@@ -1,0 +1,6 @@
+const { app, BrowserWindow, ipcMain, dialog } = require('electron')
+const path = require('path'), fs = require('fs')
+let mainWindow
+function dbPath(){ return path.join(app.getPath('userData'),'crumb-erp-local-data.json') }
+function createWindow(){mainWindow=new BrowserWindow({width:1440,height:900,webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false}});mainWindow.loadFile(path.join(__dirname,'..','dist','index.html'))}
+app.whenReady().then(()=>{ipcMain.handle('local-db:read',()=>fs.existsSync(dbPath())?fs.readFileSync(dbPath()).toString('base64'):null);ipcMain.handle('local-db:write',(_,base64)=>{fs.writeFileSync(dbPath(),Buffer.from(base64,'base64'));return true});ipcMain.handle('local-db:backup',async()=>{let out=await dialog.showSaveDialog(mainWindow,{title:'Backup Crumb ERP data',defaultPath:`crumb-erp-backup-${new Date().toISOString().slice(0,10)}.json`,filters:[{name:'Crumb ERP Backup',extensions:['json']} ]});if(out.canceled)return false;if(fs.existsSync(dbPath()))fs.copyFileSync(dbPath(),out.filePath);else fs.writeFileSync(out.filePath,Buffer.alloc(0));return out.filePath});createWindow()});app.on('window-all-closed',()=>{if(process.platform!=='darwin')app.quit()})
