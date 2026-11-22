@@ -12,11 +12,19 @@ export default async function handler(req, res) {
   const admin = createClient(url, serviceKey)
   const { data: platformAdmin } = await admin.from('platform_administrators').select('user_id').eq('user_id', user.id).maybeSingle()
   if (!platformAdmin) return res.status(403).json({ error: 'Platform administrator access required.' })
-  const { email, password, businessId, role } = req.body || {}
-  if (!email || !password || !businessId || !['owner', 'admin', 'staff'].includes(role)) return res.status(400).json({ error: 'Email, password, workspace, and role are required.' })
+  const { email, password, businessId, businessName, role, action = 'user' } = req.body || {}
+  if (!email || !password || !['owner', 'admin', 'staff'].includes(role)) return res.status(400).json({ error: 'Email, password, and role are required.' })
+  if (action === 'workspace' && !businessName?.trim()) return res.status(400).json({ error: 'Workspace name is required.' })
+  if (action !== 'workspace' && !businessId) return res.status(400).json({ error: 'Workspace is required.' })
   const { data: created, error: createError } = await admin.auth.admin.createUser({ email, password, email_confirm: true })
   if (createError) return res.status(400).json({ error: createError.message })
-  const { error: memberError } = await admin.from('business_members').insert({ business_id: businessId, user_id: created.user.id, role })
+  let workspaceId = businessId
+  if (action === 'workspace') {
+    const { data: workspace, error: workspaceError } = await admin.from('businesses').insert({ name: businessName.trim(), owner_id: created.user.id }).select().single()
+    if (workspaceError) { await admin.auth.admin.deleteUser(created.user.id); return res.status(400).json({ error: workspaceError.message }) }
+    workspaceId = workspace.id
+  }
+  const { error: memberError } = await admin.from('business_members').insert({ business_id: workspaceId, user_id: created.user.id, role: action === 'workspace' ? 'owner' : role })
   if (memberError) { await admin.auth.admin.deleteUser(created.user.id); return res.status(400).json({ error: memberError.message }) }
-  return res.status(201).json({ message: 'Restaurant user created.' })
+  return res.status(201).json({ message: action === 'workspace' ? 'Workspace and owner login created.' : 'Restaurant user created.' })
 }
