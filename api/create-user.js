@@ -12,15 +12,16 @@ export default async function handler(req, res) {
   const { data: isPlatformAdmin, error: roleError } = await authClient.rpc('is_platform_administrator')
   if (roleError || !isPlatformAdmin) return res.status(403).json({ error: 'Platform administrator access required.' })
   const admin = createClient(url, serviceKey)
-  const { email, password, businessId, businessName, role, action = 'user' } = req.body || {}
+  const { email, password, businessId, businessName, role, accessDays, action = 'user' } = req.body || {}
   if (!email || !password || !['owner', 'admin', 'staff'].includes(role)) return res.status(400).json({ error: 'Email, password, and role are required.' })
-  if (action === 'workspace' && !businessName?.trim()) return res.status(400).json({ error: 'Workspace name is required.' })
+  if (action === 'workspace' && (!businessName?.trim() || !Number(accessDays) || Number(accessDays) < 1)) return res.status(400).json({ error: 'Workspace name and access duration are required.' })
   if (action !== 'workspace' && !businessId) return res.status(400).json({ error: 'Workspace is required.' })
   const { data: created, error: createError } = await admin.auth.admin.createUser({ email, password, email_confirm: true })
   if (createError) return res.status(400).json({ error: createError.message })
   let workspaceId = businessId
   if (action === 'workspace') {
-    const { data: workspace, error: workspaceError } = await admin.from('businesses').insert({ name: businessName.trim(), owner_id: created.user.id }).select().single()
+    const accessEndsAt = new Date(Date.now() + Number(accessDays) * 86400000).toISOString()
+    const { data: workspace, error: workspaceError } = await admin.from('businesses').insert({ name: businessName.trim(), owner_id: created.user.id, access_ends_at: accessEndsAt }).select().single()
     if (workspaceError) { await admin.auth.admin.deleteUser(created.user.id); return res.status(400).json({ error: workspaceError.message }) }
     workspaceId = workspace.id
   }
