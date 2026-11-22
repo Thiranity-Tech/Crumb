@@ -6,12 +6,12 @@ export default async function handler(req, res) {
   const url = process.env.VITE_SUPABASE_URL
   if (!serviceKey || !url) return res.status(500).json({ error: 'Server administrator setup is incomplete.' })
   const token = req.headers.authorization?.replace('Bearer ', '')
-  const authClient = createClient(url, process.env.VITE_SUPABASE_ANON_KEY)
+  const authClient = createClient(url, process.env.VITE_SUPABASE_ANON_KEY, { global: { headers: { Authorization: `Bearer ${token}` } } })
   const { data: { user }, error: authError } = await authClient.auth.getUser(token)
   if (authError || !user) return res.status(401).json({ error: 'Please sign in again.' })
+  const { data: isPlatformAdmin, error: roleError } = await authClient.rpc('is_platform_administrator')
+  if (roleError || !isPlatformAdmin) return res.status(403).json({ error: 'Platform administrator access required.' })
   const admin = createClient(url, serviceKey)
-  const { data: platformAdmin } = await admin.from('platform_administrators').select('user_id').eq('user_id', user.id).maybeSingle()
-  if (!platformAdmin) return res.status(403).json({ error: 'Platform administrator access required.' })
   const { email, password, businessId, businessName, role, action = 'user' } = req.body || {}
   if (!email || !password || !['owner', 'admin', 'staff'].includes(role)) return res.status(400).json({ error: 'Email, password, and role are required.' })
   if (action === 'workspace' && !businessName?.trim()) return res.status(400).json({ error: 'Workspace name is required.' })
