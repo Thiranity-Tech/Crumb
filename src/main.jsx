@@ -2538,7 +2538,9 @@ function Portal() {
         route()
       })
       .subscribe()
+    const interval = setInterval(route, 30000)
     return () => {
+      clearInterval(interval)
       supabase.removeChannel(channel)
     }
   }, [s])
@@ -2551,9 +2553,12 @@ function Portal() {
   return (
     <main className="auth">
       <div className="authbox">
-        <h1>Access unavailable</h1>
-        <p>{msg}</p>
-        <button onClick={() => supabase.auth.signOut()}>Sign out</button>
+        <h1 style={{ color: '#dc2626' }}>⛔ Access Unavailable</h1>
+        <p style={{ marginTop: '12px', lineHeight: 1.6, color: '#334155', fontSize: '14px' }}>{msg}</p>
+        <div style={{ marginTop: '16px', padding: '12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '8px', fontSize: '13px', color: '#991b1b', fontWeight: 600 }}>
+          📞 Please contact your administrator to renew or restore access to this workspace.
+        </div>
+        <button style={{ marginTop: '20px' }} onClick={() => supabase.auth.signOut()}>Sign out</button>
       </div>
     </main>
   )
