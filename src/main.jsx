@@ -347,27 +347,30 @@ function Admin() {
 }
 
 function Restaurant({ business }) {
-  const [data, setData] = useState({ products: [], purchases: [], expenses: [], sales: [], items: [] })
+  const [data, setData] = useState({ products: [], ingredients: [], purchases: [], expenses: [], sales: [], items: [] })
   const [view, setView] = useState('Dashboard')
   const [cart, setCart] = useState([])
   const [pass, setPass] = useState('')
   const [note, setNote] = useState('')
 
+  const [inventoryTab, setInventoryTab] = useState('packed')
   const [editProd, setEditProd] = useState(null)
+  const [editIng, setEditIng] = useState(null)
   const [editPurchase, setEditPurchase] = useState(null)
   const [editExpense, setEditExpense] = useState(null)
   const [receiptModal, setReceiptModal] = useState(null)
   const [autoPrint, setAutoPrint] = useState(false)
 
   async function load() {
-    let [products, purchases, expenses, sales, items] = await Promise.all([
+    let [products, ingredients, purchases, expenses, sales, items] = await Promise.all([
       query('select * from products order by name'),
+      query('select * from ingredients order by name'),
       query('select * from purchases order by purchased_at desc'),
       query('select * from expenses order by expense_at desc'),
       query('select * from sales order by sold_at desc'),
       query('select * from sale_items')
     ])
-    setData({ products, purchases, expenses, sales, items })
+    setData({ products, ingredients, purchases, expenses, sales, items })
     setCart(prev => prev.filter(c => products.some(p => String(p.id) === String(c.id))))
   }
 
@@ -405,13 +408,47 @@ function Restaurant({ business }) {
     await load()
   }
 
+  async function addIngredient(e) {
+    e.preventDefault()
+    let f = new FormData(e.target)
+    const cost = Number(f.get('cost')) || 0
+    await execute('insert into ingredients(name,quantity,unit,total_cost,updated_at) values(?,?,?,?,?)', [
+      f.get('name')?.toString().trim(),
+      Number(f.get('quantity')) || 0,
+      f.get('unit') || 'Piece',
+      cost,
+      new Date().toISOString()
+    ])
+    e.target.reset()
+    await load()
+  }
+
+  async function saveIngredientEdit(id) {
+    if (!editIng || !editIng.name.trim()) return
+    await updateRecord('ingredients', id, {
+      name: editIng.name.trim(),
+      quantity: Number(editIng.quantity) || 0,
+      unit: editIng.unit || 'Piece',
+      total_cost: Number(editIng.cost) || 0
+    })
+    setEditIng(null)
+    await load()
+  }
+
+  async function deleteIngredient(id) {
+    if (!window.confirm('Delete this ingredient from inventory?')) return
+    await deleteRecord('ingredients', id)
+    if (editIng?.id === id) setEditIng(null)
+    await load()
+  }
+
   async function addPurchase(e) {
     e.preventDefault()
     let f = new FormData(e.target)
     await execute('insert into purchases(product_name,quantity,unit,total_cost,purchased_at) values(?,?,?,?,?)', [
       f.get('name')?.toString().trim(),
       Number(f.get('quantity')) || 1,
-      f.get('unit'),
+      f.get('unit') || 'Piece',
       Number(f.get('cost')) || 0,
       new Date().toISOString()
     ])
@@ -434,7 +471,7 @@ function Restaurant({ business }) {
   }
 
   async function deletePurchase(id) {
-    if (!window.confirm('Delete this purchase record? Dashboard profit/loss will update automatically.')) return
+    if (!window.confirm('Delete this purchase record? Dashboard profit/loss and ingredient stock will update automatically.')) return
     await deleteRecord('purchases', id)
     if (editPurchase?.id === id) setEditPurchase(null)
     await load()
@@ -693,91 +730,261 @@ function Restaurant({ business }) {
     },
     Inventory: () => (
       <Layout title="Inventory">
-        <Form title="Add product" onSubmit={addProduct}>
-          <input name="name" placeholder="Product name" required />
-          <input name="price" type="number" min="0" step="any" placeholder="Selling price ₹" required />
-        </Form>
-        <section className="tablecard">
-          <table>
-            <thead>
-              <tr>
-                <th>Product</th>
-                <th>Selling price</th>
-                <th style={{ width: '180px' }}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.products.length ? (
-                data.products.map(p => {
-                  const isEditing = editProd?.id === p.id
-                  return (
-                    <tr key={p.id}>
-                      <td>
-                        {isEditing ? (
-                          <input
-                            value={editProd.name}
-                            onChange={e => setEditProd({ ...editProd, name: e.target.value })}
-                            placeholder="Product name"
-                            required
-                          />
-                        ) : (
-                          <b>{p.name}</b>
-                        )}
-                      </td>
-                      <td>
-                        {isEditing ? (
-                          <input
-                            type="number"
-                            min="0"
-                            step="any"
-                            value={editProd.price}
-                            onChange={e => setEditProd({ ...editProd, price: e.target.value })}
-                            placeholder="Selling price ₹"
-                            style={{ width: '130px' }}
-                            required
-                          />
-                        ) : (
-                          money(p.selling_price ?? p.price)
-                        )}
-                      </td>
-                      <td>
-                        {isEditing ? (
-                          <>
-                            <button className="btnSave" onClick={() => saveProductEdit(p.id)}>Save</button>
-                            <button className="btnCancel" onClick={() => setEditProd(null)}>Cancel</button>
-                          </>
-                        ) : (
-                          <>
-                            <button
-                              className="btnEdit"
-                              onClick={() => setEditProd({ id: p.id, name: p.name, price: p.selling_price ?? p.price ?? 0 })}
-                            >
-                              Edit
-                            </button>
-                            <button className="btnDelete" onClick={() => deleteProduct(p.id)}>Delete</button>
-                          </>
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })
-              ) : (
-                <tr><td colSpan={3}><Empty>No products yet.</Empty></td></tr>
-              )}
-            </tbody>
-          </table>
-        </section>
+        <div className="inventoryTabs">
+          <button
+            type="button"
+            className={`inventoryTabBtn ${inventoryTab === 'packed' ? 'active' : ''}`}
+            onClick={() => setInventoryTab('packed')}
+          >
+            📦 Packed Items ({data.products.length})
+          </button>
+          <button
+            type="button"
+            className={`inventoryTabBtn ${inventoryTab === 'ingredients' ? 'active' : ''}`}
+            onClick={() => setInventoryTab('ingredients')}
+          >
+            🌾 Ingredients & Raw Materials ({data.ingredients.length})
+          </button>
+        </div>
+
+        {inventoryTab === 'packed' ? (
+          <>
+            <Form title="Add packed item (Menu)" onSubmit={addProduct}>
+              <input name="name" placeholder="Item name (e.g. Butter Croissant)" required />
+              <input name="price" type="number" min="0" step="any" placeholder="Selling price ₹" required />
+            </Form>
+            <section className="tablecard">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Packed Item (Menu)</th>
+                    <th>Selling price</th>
+                    <th style={{ width: '180px' }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.products.length ? (
+                    data.products.map(p => {
+                      const isEditing = editProd?.id === p.id
+                      return (
+                        <tr key={p.id}>
+                          <td>
+                            {isEditing ? (
+                              <input
+                                value={editProd.name}
+                                onChange={e => setEditProd({ ...editProd, name: e.target.value })}
+                                placeholder="Item name"
+                                required
+                              />
+                            ) : (
+                              <b>{p.name}</b>
+                            )}
+                          </td>
+                          <td>
+                            {isEditing ? (
+                              <input
+                                type="number"
+                                min="0"
+                                step="any"
+                                value={editProd.price}
+                                onChange={e => setEditProd({ ...editProd, price: e.target.value })}
+                                placeholder="Selling price ₹"
+                                style={{ width: '130px' }}
+                                required
+                              />
+                            ) : (
+                              money(p.selling_price ?? p.price)
+                            )}
+                          </td>
+                          <td>
+                            {isEditing ? (
+                              <>
+                                <button className="btnSave" onClick={() => saveProductEdit(p.id)}>Save</button>
+                                <button className="btnCancel" onClick={() => setEditProd(null)}>Cancel</button>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  className="btnEdit"
+                                  onClick={() => setEditProd({ id: p.id, name: p.name, price: p.selling_price ?? p.price ?? 0 })}
+                                >
+                                  Edit
+                                </button>
+                                <button className="btnDelete" onClick={() => deleteProduct(p.id)}>Delete</button>
+                              </>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })
+                  ) : (
+                    <tr><td colSpan={3}><Empty>No packed items yet. Add sellable menu products above.</Empty></td></tr>
+                  )}
+                </tbody>
+              </table>
+            </section>
+          </>
+        ) : (
+          <>
+            <div className="inventoryInfoBanner">
+              <span>💡</span>
+              <div>
+                <b>Automated Sync with Product Purchase:</b> All items purchased under <b>Product Purchase</b> are automatically stored and stock-updated here. You can also manually add or adjust ingredient stock below.
+              </div>
+            </div>
+            <Form title="Add ingredient / raw material" onSubmit={addIngredient}>
+              <input name="name" placeholder="Ingredient name (e.g. Flour, Butter, Yeast)" required />
+              <input name="quantity" type="number" min="0" step="any" placeholder="Initial stock quantity" required />
+              <select name="unit">
+                <option>Piece</option>
+                <option>Kg</option>
+                <option>Gram</option>
+                <option>Litre</option>
+                <option>Box</option>
+                <option>Pack</option>
+              </select>
+              <input name="cost" type="number" min="0" step="any" placeholder="Estimated / total cost ₹" />
+            </Form>
+            <section className="tablecard">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Ingredient / Raw Material</th>
+                    <th>In-Stock Quantity</th>
+                    <th>Unit</th>
+                    <th>Total Value / Cost</th>
+                    <th>Last Updated</th>
+                    <th style={{ width: '180px' }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.ingredients.length ? (
+                    data.ingredients.map(ing => {
+                      const isEditing = editIng?.id === ing.id
+                      const qty = Number(ing.quantity || 0)
+                      return (
+                        <tr key={ing.id}>
+                          <td>
+                            {isEditing ? (
+                              <input
+                                value={editIng.name}
+                                onChange={e => setEditIng({ ...editIng, name: e.target.value })}
+                                placeholder="Ingredient name"
+                                required
+                              />
+                            ) : (
+                              <b>{ing.name}</b>
+                            )}
+                          </td>
+                          <td>
+                            {isEditing ? (
+                              <input
+                                type="number"
+                                min="0"
+                                step="any"
+                                value={editIng.quantity}
+                                onChange={e => setEditIng({ ...editIng, quantity: e.target.value })}
+                                style={{ width: '90px' }}
+                                required
+                              />
+                            ) : (
+                              <span className={qty <= 0 ? 'stockOut' : (qty < 5 ? 'stockLow' : 'stockIn')}>
+                                {qty}
+                              </span>
+                            )}
+                          </td>
+                          <td>
+                            {isEditing ? (
+                              <select
+                                value={editIng.unit}
+                                onChange={e => setEditIng({ ...editIng, unit: e.target.value })}
+                                style={{ width: '100px' }}
+                              >
+                                <option>Piece</option>
+                                <option>Kg</option>
+                                <option>Gram</option>
+                                <option>Litre</option>
+                                <option>Box</option>
+                                <option>Pack</option>
+                              </select>
+                            ) : (
+                              <span className="unitBadge">{ing.unit || 'Piece'}</span>
+                            )}
+                          </td>
+                          <td>
+                            {isEditing ? (
+                              <input
+                                type="number"
+                                min="0"
+                                step="any"
+                                value={editIng.cost}
+                                onChange={e => setEditIng({ ...editIng, cost: e.target.value })}
+                                style={{ width: '110px' }}
+                              />
+                            ) : (
+                              money(ing.total_cost || 0)
+                            )}
+                          </td>
+                          <td>{fmt(ing.updated_at)}</td>
+                          <td>
+                            {isEditing ? (
+                              <>
+                                <button className="btnSave" onClick={() => saveIngredientEdit(ing.id)}>Save</button>
+                                <button className="btnCancel" onClick={() => setEditIng(null)}>Cancel</button>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  className="btnEdit"
+                                  onClick={() => setEditIng({
+                                    id: ing.id,
+                                    name: ing.name,
+                                    quantity: ing.quantity,
+                                    unit: ing.unit || 'Piece',
+                                    cost: ing.total_cost || 0
+                                  })}
+                                >
+                                  Edit
+                                </button>
+                                <button className="btnDelete" onClick={() => deleteIngredient(ing.id)}>Delete</button>
+                              </>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })
+                  ) : (
+                    <tr><td colSpan={6}><Empty>No ingredients recorded yet. Purchases in "Product Purchase" will automatically appear here.</Empty></td></tr>
+                  )}
+                </tbody>
+              </table>
+            </section>
+          </>
+        )}
       </Layout>
     ),
     'Product Purchase': () => (
       <Layout title="Product Purchase">
-        <Form title="Record purchase cost" onSubmit={addPurchase}>
-          <input name="name" placeholder="Purchased product name" required />
-          <input name="quantity" type="number" min=".001" step="any" placeholder="Quantity" required />
+        <Form title="Record product purchase (Stores in Ingredients)" onSubmit={addPurchase}>
+          <input
+            name="name"
+            list="ingredient-suggestions"
+            placeholder="Purchased product / ingredient name"
+            required
+          />
+          <datalist id="ingredient-suggestions">
+            {data.ingredients.map(ing => (
+              <option key={ing.id} value={ing.name} />
+            ))}
+          </datalist>
+          <input name="quantity" type="number" min="0.001" step="any" placeholder="Quantity" required />
           <select name="unit">
             <option>Piece</option>
             <option>Kg</option>
+            <option>Gram</option>
+            <option>Litre</option>
             <option>Box</option>
+            <option>Pack</option>
           </select>
           <input name="cost" type="number" min="0" step="any" placeholder="Total cost ₹" required />
         </Form>
@@ -786,7 +993,7 @@ function Restaurant({ business }) {
             <thead>
               <tr>
                 <th>Date</th>
-                <th>Product</th>
+                <th>Product / Ingredient</th>
                 <th>Quantity</th>
                 <th>Cost</th>
                 <th style={{ width: '180px' }}>Actions</th>
@@ -829,7 +1036,10 @@ function Restaurant({ business }) {
                             >
                               <option>Piece</option>
                               <option>Kg</option>
+                              <option>Gram</option>
+                              <option>Litre</option>
                               <option>Box</option>
+                              <option>Pack</option>
                             </select>
                           </div>
                         ) : (
