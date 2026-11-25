@@ -13,12 +13,23 @@ export default async function handler(req, res) {
 
   if (!serviceKey || !url) return res.status(500).json({ error: 'Server administrator setup is incomplete.' })
   const token = req.headers.authorization?.replace('Bearer ', '')
+  if (!token) return res.status(401).json({ error: 'Authorization header is required.' })
+
   const authClient = createClient(url, anonKey, { global: { headers: { Authorization: `Bearer ${token}` } } })
   const { data: { user }, error: authError } = await authClient.auth.getUser(token)
   if (authError || !user) return res.status(401).json({ error: 'Please sign in again.' })
-  const { data: isPlatformAdmin, error: roleError } = await authClient.rpc('is_platform_administrator')
-  if (roleError || !isPlatformAdmin) return res.status(403).json({ error: 'Platform administrator access required.' })
+
   const admin = createClient(url, serviceKey)
+
+  // Verify platform administrator access
+  const { data: isPlatformAdmin } = await authClient.rpc('is_platform_administrator')
+  let authorized = Boolean(isPlatformAdmin)
+  if (!authorized) {
+    const { data: platAdminRow } = await admin.from('platform_administrators').select('user_id').eq('user_id', user.id).maybeSingle()
+    if (platAdminRow?.user_id) authorized = true
+  }
+  if (!authorized) return res.status(403).json({ error: 'Platform administrator access required.' })
+
   const { email, password, businessId, businessName, name, role, accessDays, accessEndsAt, action = 'user' } = req.body || {}
 
   if (action === 'update-workspace' || action === 'update-access') {
@@ -57,22 +68,57 @@ export default async function handler(req, res) {
   if (action === 'delete-workspace') {
     if (!businessId) return res.status(400).json({ error: 'Workspace ID is required.' })
     try {
-      // Clean up child tables if any records exist in supabase
-      await admin.from('business_members').delete().eq('business_id', businessId)
-      await admin.from('sale_items').delete().eq('business_id', businessId).catch(() => {})
-      await admin.from('sales').delete().eq('business_id', businessId).catch(() => {})
-      await admin.from('purchases').delete().eq('business_id', businessId).catch(() => {})
-      await admin.from('expenses').delete().eq('business_id', businessId).catch(() => {})
-      await admin.from('products').delete().eq('business_id', businessId).catch(() => {})
+      // 1. Fetch business and members
+      const { data: biz } = await admin.from('businesses').select('id, owner_id').eq('id', businessId).maybeSingle()
+      if (!biz) {
+        return res.status(200).json({ message: 'Workspace already deleted.' })
+      }
 
+      const { data: members } = await admin.from('business_members').select('user_id').eq('business_id', businessId)
+      const { data: platAdmins } = await admin.from('platform_administrators').select('user_id')
+      const adminUserIds = new Set((platAdmins || []).map(p => p.user_id))
+
+      const usersToCheck = new Set()
+      if (biz.owner_id && !adminUserIds.has(biz.owner_id)) {
+        usersToCheck.add(biz.owner_id)
+      }
+      for (const m of (members || [])) {
+        if (m.user_id && !adminUserIds.has(m.user_id)) {
+          usersToCheck.add(m.user_id)
+        }
+      }
+
+      // 2. Safely clean up child operational records in FK dependency order
+      const { data: bizSales } = await admin.from('sales').select('id').eq('business_id', businessId)
+      if (bizSales && bizSales.length > 0) {
+        const saleIds = bizSales.map(s => s.id)
+        await admin.from('sale_items').delete().in('sale_id', saleIds)
+      }
+      await admin.from('sales').delete().eq('business_id', businessId)
+      await admin.from('purchases').delete().eq('business_id', businessId)
+      await admin.from('expenses').delete().eq('business_id', businessId)
+      await admin.from('products').delete().eq('business_id', businessId)
+      await admin.from('business_members').delete().eq('business_id', businessId)
+
+      // 3. Delete the business itself
       const { error: deleteError } = await admin.from('businesses').delete().eq('id', businessId)
       if (deleteError) return res.status(400).json({ error: deleteError.message })
+
+      // 4. Delete orphaned users from auth so their emails can be reused
+      for (const uid of usersToCheck) {
+        const { count } = await admin.from('business_members').select('*', { count: 'exact', head: true }).eq('user_id', uid)
+        if (!count || count === 0) {
+          await admin.auth.admin.deleteUser(uid).catch(() => {})
+        }
+      }
+
       return res.status(200).json({ message: 'Workspace deleted permanently.' })
     } catch (err) {
       return res.status(500).json({ error: err.message || 'Failed to delete workspace.' })
     }
   }
 
+  // User / workspace creation
   if (!email || !password || !['owner', 'admin', 'staff'].includes(role)) return res.status(400).json({ error: 'Email, password, and role are required.' })
   if (action === 'workspace' && (!businessName?.trim() || !Number(accessDays) || Number(accessDays) < 1)) return res.status(400).json({ error: 'Workspace name and access duration are required.' })
   if (action !== 'workspace' && !businessId) return res.status(400).json({ error: 'Workspace is required.' })

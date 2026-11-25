@@ -207,37 +207,25 @@ function Admin() {
     setNote('')
 
     try {
-      let { error: directErr } = await supabase
-        .from('businesses')
-        .update({ name: trimmedName, access_ends_at: newEndsAt })
-        .eq('id', businessId)
+      const endpoint = getApiEndpoint('/api/create-user')
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session?.access_token) throw new Error('Session expired. Please sign in again.')
 
-      if (directErr) {
-        let { error: rpcErr } = await supabase.rpc('update_workspace', {
-          target_business_id: businessId,
-          new_name: trimmedName,
-          new_access_ends_at: newEndsAt
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`
+        },
+        body: JSON.stringify({
+          action: 'update-workspace',
+          businessId,
+          businessName: trimmedName,
+          accessEndsAt: newEndsAt
         })
-        if (rpcErr) {
-          const endpoint = getApiEndpoint('/api/create-user')
-          const { data: { session } } = await supabase.auth.getSession()
-          const res = await fetch(endpoint, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${session?.access_token}`
-            },
-            body: JSON.stringify({
-              action: 'update-workspace',
-              businessId,
-              businessName: trimmedName,
-              accessEndsAt: newEndsAt
-            })
-          })
-          const out = await res.json().catch(() => ({}))
-          if (!res.ok) throw new Error(out.error || 'Failed to update workspace')
-        }
-      }
+      })
+      const out = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(out.error || 'Failed to update workspace')
 
       setNote(`Workspace "${trimmedName}" updated successfully.`)
       setEditingId(null)
@@ -254,38 +242,27 @@ function Admin() {
       return
     }
 
-    const stoppedAt = new Date(Date.now() - 5000).toISOString()
     setUpdatingId(x.business_id)
     setNote('')
 
     try {
-      let { error: directErr } = await supabase
-        .from('businesses')
-        .update({ access_ends_at: stoppedAt })
-        .eq('id', x.business_id)
+      const endpoint = getApiEndpoint('/api/create-user')
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session?.access_token) throw new Error('Session expired. Please sign in again.')
 
-      if (directErr) {
-        let { error: rpcErr } = await supabase.rpc('stop_workspace_access', {
-          target_business_id: x.business_id
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`
+        },
+        body: JSON.stringify({
+          action: 'stop-access',
+          businessId: x.business_id
         })
-        if (rpcErr) {
-          const endpoint = getApiEndpoint('/api/create-user')
-          const { data: { session } } = await supabase.auth.getSession()
-          const res = await fetch(endpoint, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${session?.access_token}`
-            },
-            body: JSON.stringify({
-              action: 'stop-access',
-              businessId: x.business_id
-            })
-          })
-          const out = await res.json().catch(() => ({}))
-          if (!res.ok) throw new Error(out.error || 'Failed to stop workspace access')
-        }
-      }
+      })
+      const out = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(out.error || 'Failed to stop workspace access')
 
       setNote(`Access for "${x.business_name}" has been stopped abruptly.`)
       await load()
@@ -305,35 +282,26 @@ function Admin() {
     setNote('')
 
     try {
-      await supabase.from('business_members').delete().eq('business_id', x.business_id)
-      let { error: directErr } = await supabase
-        .from('businesses')
-        .delete()
-        .eq('id', x.business_id)
+      const endpoint = getApiEndpoint('/api/create-user')
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session?.access_token) throw new Error('Session expired. Please sign in again.')
 
-      if (directErr) {
-        let { error: rpcErr } = await supabase.rpc('delete_workspace', {
-          target_business_id: x.business_id
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`
+        },
+        body: JSON.stringify({
+          action: 'delete-workspace',
+          businessId: x.business_id
         })
-        if (rpcErr) {
-          const endpoint = getApiEndpoint('/api/create-user')
-          const { data: { session } } = await supabase.auth.getSession()
-          const res = await fetch(endpoint, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${session?.access_token}`
-            },
-            body: JSON.stringify({
-              action: 'delete-workspace',
-              businessId: x.business_id
-            })
-          })
-          const out = await res.json().catch(() => ({}))
-          if (!res.ok) throw new Error(out.error || 'Failed to delete workspace')
-        }
-      }
+      })
+      const out = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(out.error || 'Failed to delete workspace')
 
+      // Optimistically remove from local state immediately
+      setBs(prev => prev.filter(b => b.business_id !== x.business_id))
       setNote(`Workspace "${x.business_name}" deleted permanently.`)
       await load()
     } catch (err) {
@@ -558,7 +526,7 @@ function Admin() {
                             onClick={() => handleStopAccess(x)}
                             title="Abruptly stop client access right now"
                           >
-                            ⛔ Stop Access
+                            {isBusy ? 'Stopping…' : '⛔ Stop Access'}
                           </button>
                         ) : (
                           <button
@@ -577,7 +545,7 @@ function Admin() {
                           onClick={() => handleDeleteWorkspace(x)}
                           title="Permanently delete workspace and its members"
                         >
-                          🗑️ Delete
+                          {isBusy ? 'Deleting…' : '🗑️ Delete'}
                         </button>
                       </div>
                     </td>
