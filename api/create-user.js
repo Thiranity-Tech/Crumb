@@ -32,6 +32,63 @@ export default async function handler(req, res) {
 
   const { email, password, businessId, businessName, name, role, accessDays, accessEndsAt, action = 'user' } = req.body || {}
 
+  if (action === 'list-workspaces' || action === 'workspaces') {
+    try {
+      const { data: businesses, error: bErr } = await admin
+        .from('businesses')
+        .select('id, name, created_at, access_ends_at, owner_id')
+        .order('created_at', { ascending: false })
+      if (bErr) return res.status(400).json({ error: bErr.message })
+
+      const { data: members } = await admin
+        .from('business_members')
+        .select('business_id, user_id, role')
+
+      const userEmailMap = {}
+      const { data: authUsersData } = await admin.auth.admin.listUsers({ perPage: 1000 })
+      for (const u of (authUsersData?.users || [])) {
+        if (u.id && u.email) userEmailMap[u.id] = u.email
+      }
+
+      for (const b of (businesses || [])) {
+        if (b.owner_id && !userEmailMap[b.owner_id]) {
+          const { data: uData } = await admin.auth.admin.getUserById(b.owner_id).catch(() => ({ data: null }))
+          if (uData?.user?.email) userEmailMap[b.owner_id] = uData.user.email
+        }
+      }
+      for (const m of (members || [])) {
+        if (m.user_id && !userEmailMap[m.user_id]) {
+          const { data: uData } = await admin.auth.admin.getUserById(m.user_id).catch(() => ({ data: null }))
+          if (uData?.user?.email) userEmailMap[m.user_id] = uData.user.email
+        }
+      }
+
+      const workspaces = (businesses || []).map(b => {
+        let email = userEmailMap[b.owner_id] || ''
+        if (!email) {
+          const ownerMember = (members || []).find(m => m.business_id === b.id && m.role === 'owner')
+          if (ownerMember) email = userEmailMap[ownerMember.user_id] || ''
+        }
+        if (!email) {
+          const anyMember = (members || []).find(m => m.business_id === b.id)
+          if (anyMember) email = userEmailMap[anyMember.user_id] || ''
+        }
+        return {
+          business_id: b.id,
+          business_name: b.name,
+          created_at: b.created_at,
+          access_ends_at: b.access_ends_at,
+          owner_id: b.owner_id,
+          owner_email: email || '—'
+        }
+      })
+
+      return res.status(200).json({ workspaces })
+    } catch (err) {
+      return res.status(500).json({ error: err.message || 'Failed to list workspaces' })
+    }
+  }
+
   if (action === 'update-workspace' || action === 'update-access') {
     if (!businessId) return res.status(400).json({ error: 'Workspace ID is required.' })
     const updates = {}

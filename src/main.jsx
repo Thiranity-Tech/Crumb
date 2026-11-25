@@ -115,6 +115,28 @@ function Admin() {
   }
 
   async function load() {
+    try {
+      const endpoint = getApiEndpoint('/api/create-user')
+      const { data: { session } } = await supabase.auth.getSession()
+      if (session?.access_token) {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session.access_token}`
+          },
+          body: JSON.stringify({ action: 'list-workspaces' })
+        })
+        const out = await res.json().catch(() => ({}))
+        if (res.ok && Array.isArray(out.workspaces)) {
+          setBs(out.workspaces)
+          return
+        }
+      }
+    } catch (e) {
+      console.warn('API list-workspaces fallback to RPC:', e)
+    }
+
     let { data, error } = await supabase.rpc('get_platform_businesses')
     if (error) setNote(error.message)
     else setBs(data || [])
@@ -426,9 +448,10 @@ function Admin() {
         <table>
           <thead>
             <tr>
-              <th style={{ minWidth: '220px' }}>Workspace / Business</th>
+              <th style={{ minWidth: '200px' }}>Workspace / Business</th>
+              <th style={{ minWidth: '220px' }}>Client / Owner Email</th>
               <th style={{ minWidth: '190px' }}>Access Status</th>
-              <th style={{ minWidth: '280px' }}>Workspace Actions</th>
+              <th style={{ minWidth: '260px' }}>Workspace Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -452,6 +475,16 @@ function Admin() {
                           required
                           style={{ minWidth: '180px' }}
                         />
+                      </td>
+                      <td>
+                        <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#64748b', marginBottom: '4px' }}>
+                          Client Email (Login ID):
+                        </label>
+                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '6px 10px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '6px' }}>
+                          <span style={{ fontSize: '13px', color: '#1e293b', fontWeight: 600 }}>
+                            ✉️ {x.owner_email || x.email || '—'}
+                          </span>
+                        </div>
                       </td>
                       <td>
                         <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#6856d8', marginBottom: '4px' }}>
@@ -518,6 +551,13 @@ function Admin() {
                       <small style={{ color: '#64748b' }}>Created {fmt(x.created_at)}</small>
                     </td>
                     <td>
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '4px 10px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '6px' }}>
+                        <span style={{ fontSize: '13px', color: '#1e293b', fontWeight: 600 }}>
+                          ✉️ {x.owner_email || x.email || '—'}
+                        </span>
+                      </div>
+                    </td>
+                    <td>
                       {x.access_ends_at ? (
                         isExpired ? (
                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '4px 10px', background: '#fef2f2', color: '#dc2626', border: '1px solid #fecaca', borderRadius: '6px', fontWeight: 700, fontSize: '12px' }}>
@@ -578,7 +618,7 @@ function Admin() {
                 )
               })
             ) : (
-              <tr><td colSpan={3}><Empty>No records yet.</Empty></td></tr>
+              <tr><td colSpan={4}><Empty>No records yet.</Empty></td></tr>
             )}
           </tbody>
         </table>
