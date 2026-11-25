@@ -103,13 +103,13 @@ function Admin() {
   const [showConfig, setShowConfig] = useState(false)
   const isDesktop = typeof window !== 'undefined' && window.location.protocol === 'file:'
   const [apiBaseUrl, setApiBaseUrl] = useState(() => {
-    return (import.meta.env.VITE_API_BASE_URL || localStorage.getItem('crumb-api-base-url') || '').trim()
+    return (import.meta.env.VITE_API_BASE_URL || localStorage.getItem('crumb-api-base-url') || 'https://crumb-snowy.vercel.app').trim()
   })
 
   function getApiEndpoint(path) {
-    const base = (apiBaseUrl || '').trim().replace(/\/+$/, '')
-    if (base) return `${base}${path}`
-    return path
+    if (!isDesktop) return path
+    const base = (apiBaseUrl || 'https://crumb-snowy.vercel.app').trim().replace(/\/+$/, '')
+    return `${base}${path}`
   }
 
   async function load() {
