@@ -3,11 +3,13 @@ const key = 'crumb-local-operational-db'
 const blank = () => ({
   products: [],
   ingredients: [],
+  recipes: [],
+  production_batches: [],
   purchases: [],
   expenses: [],
   sales: [],
   sale_items: [],
-  counters: { products: 0, ingredients: 0, purchases: 0, expenses: 0, sales: 0, sale_items: 0 }
+  counters: { products: 0, ingredients: 0, recipes: 0, production_batches: 0, purchases: 0, expenses: 0, sales: 0, sale_items: 0 }
 })
 
 function syncIngredientFromPurchase(pu) {
@@ -107,13 +109,21 @@ export async function openLocalDb() {
   // Ensure all arrays and counters exist
   db.products = db.products || []
   db.ingredients = db.ingredients || []
+  db.recipes = db.recipes || []
+  db.production_batches = db.production_batches || []
   db.purchases = db.purchases || []
   db.expenses = db.expenses || []
   db.sales = db.sales || []
   db.sale_items = db.sale_items || []
-  db.counters = db.counters || { products: 0, ingredients: 0, purchases: 0, expenses: 0, sales: 0, sale_items: 0 }
+  db.counters = db.counters || { products: 0, ingredients: 0, recipes: 0, production_batches: 0, purchases: 0, expenses: 0, sales: 0, sale_items: 0 }
   if (db.counters.ingredients == null) {
     db.counters.ingredients = db.ingredients.length ? Math.max(...db.ingredients.map(x => Number(x.id) || 0)) : 0
+  }
+  if (db.counters.recipes == null) {
+    db.counters.recipes = db.recipes.length ? Math.max(...db.recipes.map(x => Number(x.id) || 0)) : 0
+  }
+  if (db.counters.production_batches == null) {
+    db.counters.production_batches = db.production_batches.length ? Math.max(...db.production_batches.map(x => Number(x.id) || 0)) : 0
   }
 
   const isValidDt = d => d && typeof d === 'string' && !d.includes('Invalid') && !isNaN(new Date(d).getTime())
@@ -121,12 +131,14 @@ export async function openLocalDb() {
   // Normalize legacy data fields
   db.products = db.products.map(p => {
     const sp = Number(p.selling_price != null ? p.selling_price : (p.price != null ? p.price : 0))
+    const qty = Number(p.quantity != null ? p.quantity : (p.stock_quantity != null ? p.stock_quantity : 0))
     return {
       ...p,
       id: p.id || Date.now(),
       name: p.name || 'Product',
       selling_price: sp,
-      price: sp
+      price: sp,
+      quantity: qty
     }
   })
 
@@ -197,8 +209,8 @@ export async function query(sql) {
   if (sql.includes('order by name')) {
     rows.sort((a, b) => (a.name || '').localeCompare(b.name || ''))
   }
-  if (sql.includes('order by purchased_at') || sql.includes('order by expense_at') || sql.includes('order by sold_at') || sql.includes('order by updated_at')) {
-    rows.sort((a, b) => String(b.purchased_at || b.expense_at || b.sold_at || b.updated_at || '').localeCompare(String(a.purchased_at || a.expense_at || a.sold_at || a.updated_at || '')))
+  if (sql.includes('order by purchased_at') || sql.includes('order by expense_at') || sql.includes('order by sold_at') || sql.includes('order by updated_at') || sql.includes('order by started_at') || sql.includes('order by created_at')) {
+    rows.sort((a, b) => String(b.started_at || b.created_at || b.purchased_at || b.expense_at || b.sold_at || b.updated_at || '').localeCompare(String(a.started_at || a.created_at || a.purchased_at || a.expense_at || a.sold_at || a.updated_at || '')))
   }
   return rows
 }
@@ -214,12 +226,19 @@ export async function execute(sql, params = []) {
   if (t === 'products') {
     row.selling_price = Number(row.selling_price || row.price || 0)
     row.price = row.selling_price
+    row.quantity = Number(row.quantity || 0)
   } else if (t === 'ingredients') {
     row.quantity = Number(row.quantity || 0)
     row.total_cost = Number(row.total_cost || 0)
     row.last_cost = Number(row.last_cost || row.total_cost || 0)
     row.unit = row.unit || 'Piece'
     row.updated_at = row.updated_at || new Date().toISOString()
+  } else if (t === 'recipes') {
+    row.created_at = row.created_at || new Date().toISOString()
+  } else if (t === 'production_batches') {
+    row.status = row.status || 'Preparing'
+    row.started_at = row.started_at || new Date().toISOString()
+    row.produced_quantity = Number(row.produced_quantity || 0)
   } else if (t === 'purchases') {
     row.total_cost = Number(row.total_cost || row.cost || 0)
     row.cost = row.total_cost
@@ -251,6 +270,13 @@ export async function updateRecord(table, id, data) {
         updated.selling_price = p
         updated.price = p
       }
+      if (data.quantity != null) {
+        updated.quantity = Number(data.quantity)
+      }
+    } else if (table === 'production_batches') {
+      if (data.status != null) updated.status = data.status
+      if (data.completed_at != null) updated.completed_at = data.completed_at
+      if (data.produced_quantity != null) updated.produced_quantity = Number(data.produced_quantity)
     } else if (table === 'ingredients') {
       if (data.quantity != null) updated.quantity = Number(data.quantity)
       if (data.total_cost != null) updated.total_cost = Number(data.total_cost)
@@ -272,6 +298,127 @@ export async function updateRecord(table, id, data) {
     return updated
   }
   return null
+}
+
+export async function startProductionBatch({ recipe_name, recipe_id = null, ingredients = [] }) {
+  if (!db) await openLocalDb()
+  const cleanName = (recipe_name || 'Production Batch').trim()
+  const batchId = ++db.counters.production_batches
+
+  // Deduct consumed ingredients from stock
+  for (const item of ingredients) {
+    const ingName = (item.name || '').trim().toLowerCase()
+    const usedQty = Number(item.quantity || 0)
+    if (!ingName || usedQty <= 0) continue
+    const targetIng = db.ingredients.find(i => (i.name || '').toLowerCase() === ingName)
+    if (targetIng) {
+      targetIng.quantity = Math.max(0, Number((Number(targetIng.quantity || 0) - usedQty).toFixed(3)))
+      targetIng.updated_at = new Date().toISOString()
+    }
+  }
+
+  const batch = {
+    id: batchId,
+    recipe_name: cleanName,
+    recipe_id,
+    ingredients,
+    status: 'Preparing',
+    started_at: new Date().toISOString(),
+    completed_at: null,
+    produced_quantity: 0
+  }
+
+  db.production_batches.push(batch)
+  await persist()
+  return batch
+}
+
+export async function completeProductionBatch(batch_id, { produced_quantity, selling_price = 0 }) {
+  if (!db) await openLocalDb()
+  const batch = db.production_batches.find(b => String(b.id) === String(batch_id))
+  if (!batch) return null
+
+  const prodQty = Math.max(1, Number(produced_quantity || 1))
+  const sprice = Number(selling_price || 0)
+
+  batch.status = 'Completed'
+  batch.completed_at = new Date().toISOString()
+  batch.produced_quantity = prodQty
+
+  // Add produced quantity to Packed Items (products)
+  const prodName = batch.recipe_name.trim()
+  let product = db.products.find(p => (p.name || '').toLowerCase() === prodName.toLowerCase())
+
+  if (product) {
+    product.quantity = Number(((Number(product.quantity || 0)) + prodQty).toFixed(2))
+    if (sprice > 0) {
+      product.selling_price = sprice
+      product.price = sprice
+    }
+  } else {
+    product = {
+      id: ++db.counters.products,
+      name: prodName,
+      selling_price: sprice,
+      price: sprice,
+      quantity: prodQty
+    }
+    db.products.push(product)
+  }
+
+  await persist()
+  return { batch, product }
+}
+
+export async function cancelProductionBatch(batch_id) {
+  if (!db) await openLocalDb()
+  const batch = db.production_batches.find(b => String(b.id) === String(batch_id))
+  if (!batch || batch.status !== 'Preparing') return null
+
+  // Restore ingredients
+  for (const item of (batch.ingredients || [])) {
+    const ingName = (item.name || '').trim().toLowerCase()
+    const usedQty = Number(item.quantity || 0)
+    if (!ingName || usedQty <= 0) continue
+    const targetIng = db.ingredients.find(i => (i.name || '').toLowerCase() === ingName)
+    if (targetIng) {
+      targetIng.quantity = Number(((Number(targetIng.quantity || 0)) + usedQty).toFixed(3))
+      targetIng.updated_at = new Date().toISOString()
+    }
+  }
+
+  batch.status = 'Cancelled'
+  await persist()
+  return batch
+}
+
+export async function saveRecipe({ id, name, ingredients = [] }) {
+  if (!db) await openLocalDb()
+  const cleanName = (name || '').trim()
+  if (!cleanName) return null
+
+  let recipe
+  if (id) {
+    recipe = db.recipes.find(r => String(r.id) === String(id))
+    if (recipe) {
+      recipe.name = cleanName
+      recipe.ingredients = ingredients
+      recipe.updated_at = new Date().toISOString()
+    }
+  }
+
+  if (!recipe) {
+    recipe = {
+      id: ++db.counters.recipes,
+      name: cleanName,
+      ingredients,
+      created_at: new Date().toISOString()
+    }
+    db.recipes.push(recipe)
+  }
+
+  await persist()
+  return recipe
 }
 
 export async function deleteRecord(table, id) {

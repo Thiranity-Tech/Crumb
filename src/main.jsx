@@ -1,7 +1,18 @@
 import React, { useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { supabase, configured } from './supabase'
-import { openLocalDb, query, execute, backup, updateRecord, deleteRecord } from './local-db'
+import {
+  openLocalDb,
+  query,
+  execute,
+  backup,
+  updateRecord,
+  deleteRecord,
+  startProductionBatch,
+  completeProductionBatch,
+  cancelProductionBatch,
+  saveRecipe
+} from './local-db'
 import { printBill, saveBillPdf } from './printService'
 import logoImg from './assets/logo.jpg'
 import './styles.css'
@@ -347,7 +358,16 @@ function Admin() {
 }
 
 function Restaurant({ business }) {
-  const [data, setData] = useState({ products: [], ingredients: [], purchases: [], expenses: [], sales: [], items: [] })
+  const [data, setData] = useState({
+    products: [],
+    ingredients: [],
+    recipes: [],
+    production_batches: [],
+    purchases: [],
+    expenses: [],
+    sales: [],
+    items: []
+  })
   const [view, setView] = useState('Dashboard')
   const [cart, setCart] = useState([])
   const [pass, setPass] = useState('')
@@ -361,16 +381,23 @@ function Restaurant({ business }) {
   const [receiptModal, setReceiptModal] = useState(null)
   const [autoPrint, setAutoPrint] = useState(false)
 
+  // Production / Recipe state
+  const [prodModal, setProdModal] = useState(null)
+  const [recipeName, setRecipeName] = useState('')
+  const [recipeIngredients, setRecipeIngredients] = useState([{ name: '', quantity: 1, unit: 'Kg' }])
+
   async function load() {
-    let [products, ingredients, purchases, expenses, sales, items] = await Promise.all([
+    let [products, ingredients, recipes, production_batches, purchases, expenses, sales, items] = await Promise.all([
       query('select * from products order by name'),
       query('select * from ingredients order by name'),
+      query('select * from recipes order by name'),
+      query('select * from production_batches order by started_at desc'),
       query('select * from purchases order by purchased_at desc'),
       query('select * from expenses order by expense_at desc'),
       query('select * from sales order by sold_at desc'),
       query('select * from sale_items')
     ])
-    setData({ products, ingredients, purchases, expenses, sales, items })
+    setData({ products, ingredients, recipes, production_batches, purchases, expenses, sales, items })
     setCart(prev => prev.filter(c => products.some(p => String(p.id) === String(c.id))))
   }
 
@@ -381,9 +408,10 @@ function Restaurant({ business }) {
   async function addProduct(e) {
     e.preventDefault()
     let f = new FormData(e.target)
-    await execute('insert into products(name,selling_price) values(?,?)', [
+    await execute('insert into products(name,selling_price,quantity) values(?,?,?)', [
       f.get('name')?.toString().trim(),
-      Number(f.get('price')) || 0
+      Number(f.get('price')) || 0,
+      Number(f.get('quantity')) || 0
     ])
     e.target.reset()
     await load()
@@ -394,7 +422,8 @@ function Restaurant({ business }) {
     await updateRecord('products', id, {
       name: editProd.name.trim(),
       selling_price: Number(editProd.price) || 0,
-      price: Number(editProd.price) || 0
+      price: Number(editProd.price) || 0,
+      quantity: Number(editProd.quantity) || 0
     })
     setEditProd(null)
     await load()
@@ -406,6 +435,68 @@ function Restaurant({ business }) {
     setCart(prev => prev.filter(c => String(c.id) !== String(id)))
     if (editProd?.id === id) setEditProd(null)
     await load()
+  }
+
+  async function handleStartBatch(e) {
+    if (e) e.preventDefault()
+    const cleanName = recipeName.trim()
+    if (!cleanName) {
+      alert('Please enter a recipe / product name')
+      return
+    }
+    const cleanIngredients = recipeIngredients.filter(i => (i.name || '').trim() && Number(i.quantity) > 0)
+    if (!cleanIngredients.length) {
+      alert('Please select at least one ingredient with a valid quantity.')
+      return
+    }
+
+    await startProductionBatch({
+      recipe_name: cleanName,
+      ingredients: cleanIngredients
+    })
+
+    setRecipeName('')
+    setRecipeIngredients([{ name: '', quantity: 1, unit: 'Kg' }])
+    await load()
+    setNote(`Batch "${cleanName}" started and marked as Preparing! Ingredients were consumed from stock.`)
+  }
+
+  async function handleSaveRecipeTemplate() {
+    const cleanName = recipeName.trim()
+    if (!cleanName) {
+      alert('Please enter a recipe name to save.')
+      return
+    }
+    const cleanIngredients = recipeIngredients.filter(i => (i.name || '').trim() && Number(i.quantity) > 0)
+    await saveRecipe({
+      name: cleanName,
+      ingredients: cleanIngredients
+    })
+    await load()
+    setNote(`Recipe template "${cleanName}" saved successfully.`)
+  }
+
+  async function handleCompleteBatch() {
+    if (!prodModal) return
+    const qty = Math.max(1, Number(prodModal.quantity) || 1)
+    const price = Number(prodModal.price) || 0
+
+    await completeProductionBatch(prodModal.batch.id, {
+      produced_quantity: qty,
+      selling_price: price
+    })
+
+    const name = prodModal.batch.recipe_name
+    setProdModal(null)
+    await load()
+    setNote(`✓ Finished batch: "${name}" (+${qty} pieces) added to Packed Items and available in Billing!`)
+  }
+
+  async function handleCancelBatch(batchId) {
+    if (!window.confirm('Cancel this preparation batch? The consumed ingredients will be restored back to stock.')) return
+    await cancelProductionBatch(batchId)
+    await load()
+    setNote('Preparation batch cancelled. Consumed ingredients restored.')
   }
 
   async function addIngredient(e) {
@@ -549,6 +640,12 @@ function Restaurant({ business }) {
         price: uPrice,
         total: x.quantity * uPrice
       })
+      // Deduct sold quantity from Packed Item stock
+      const prod = data.products.find(p => String(p.id) === String(x.id))
+      if (prod) {
+        const remaining = Math.max(0, (Number(prod.quantity) || 0) - x.quantity)
+        await updateRecord('products', prod.id, { quantity: remaining })
+      }
     }
 
     const completedInvoice = {
@@ -677,6 +774,9 @@ function Restaurant({ business }) {
                   <button className="prod" onClick={() => add(p)} key={p.id}>
                     <b>{p.name}</b>
                     <small>Menu item</small>
+                    <span className={`prodStock ${Number(p.quantity || 0) > 0 ? 'in' : 'out'}`}>
+                      {Number(p.quantity || 0) > 0 ? `${p.quantity} in stock` : '0 in stock'}
+                    </span>
                     <strong>{money(p.selling_price ?? p.price)}</strong>
                   </button>
                 ))}
@@ -751,6 +851,7 @@ function Restaurant({ business }) {
           <>
             <Form title="Add packed item (Menu)" onSubmit={addProduct}>
               <input name="name" placeholder="Item name (e.g. Butter Croissant)" required />
+              <input name="quantity" type="number" min="0" step="1" placeholder="Initial stock quantity (default 0)" />
               <input name="price" type="number" min="0" step="any" placeholder="Selling price ₹" required />
             </Form>
             <section className="tablecard">
@@ -758,6 +859,7 @@ function Restaurant({ business }) {
                 <thead>
                   <tr>
                     <th>Packed Item (Menu)</th>
+                    <th>In-Stock Quantity</th>
                     <th>Selling price</th>
                     <th style={{ width: '180px' }}>Actions</th>
                   </tr>
@@ -785,11 +887,27 @@ function Restaurant({ business }) {
                               <input
                                 type="number"
                                 min="0"
+                                step="1"
+                                value={editProd.quantity ?? 0}
+                                onChange={e => setEditProd({ ...editProd, quantity: e.target.value })}
+                                style={{ width: '80px' }}
+                              />
+                            ) : (
+                              <span className={Number(p.quantity || 0) <= 0 ? 'stockOut' : 'stockIn'}>
+                                {p.quantity || 0} Pieces
+                              </span>
+                            )}
+                          </td>
+                          <td>
+                            {isEditing ? (
+                              <input
+                                type="number"
+                                min="0"
                                 step="any"
                                 value={editProd.price}
                                 onChange={e => setEditProd({ ...editProd, price: e.target.value })}
                                 placeholder="Selling price ₹"
-                                style={{ width: '130px' }}
+                                style={{ width: '110px' }}
                                 required
                               />
                             ) : (
@@ -806,7 +924,12 @@ function Restaurant({ business }) {
                               <>
                                 <button
                                   className="btnEdit"
-                                  onClick={() => setEditProd({ id: p.id, name: p.name, price: p.selling_price ?? p.price ?? 0 })}
+                                  onClick={() => setEditProd({
+                                    id: p.id,
+                                    name: p.name,
+                                    price: p.selling_price ?? p.price ?? 0,
+                                    quantity: p.quantity || 0
+                                  })}
                                 >
                                   Edit
                                 </button>
@@ -818,7 +941,7 @@ function Restaurant({ business }) {
                       )
                     })
                   ) : (
-                    <tr><td colSpan={3}><Empty>No packed items yet. Add sellable menu products above.</Empty></td></tr>
+                    <tr><td colSpan={4}><Empty>No packed items yet. Add sellable menu products above.</Empty></td></tr>
                   )}
                 </tbody>
               </table>
@@ -963,6 +1086,275 @@ function Restaurant({ business }) {
         )}
       </Layout>
     ),
+    'Kitchen / Production': () => {
+      const activeBatches = data.production_batches.filter(b => b.status === 'Preparing')
+      const completedBatches = data.production_batches.filter(b => b.status !== 'Preparing')
+
+      return (
+        <Layout title="Kitchen / Production">
+          {/* Section 1: Active Batches being prepared */}
+          <section style={{ marginBottom: '20px' }}>
+            <h2>🍳 Active Batches (Currently Preparing)</h2>
+            <p style={{ color: '#718097', fontSize: '13px', margin: '-8px 0 16px' }}>
+              Batches in oven / kitchen. When finished baking or preparing, click <b>Mark as Done</b> to specify produced units and transfer to Packed Items for Billing.
+            </p>
+            {activeBatches.length ? (
+              <div className="batchGrid">
+                {activeBatches.map(b => (
+                  <div className="batchCard" key={b.id}>
+                    <div className="batchHeader">
+                      <div>
+                        <h3 className="batchTitle">{b.recipe_name}</h3>
+                        <span className="batchTime">Started: {fmt(b.started_at)}</span>
+                      </div>
+                      <span className="statusPreparing">⏳ Preparing</span>
+                    </div>
+
+                    <div className="batchIngredients">
+                      <small>Ingredients Consumed:</small>
+                      {b.ingredients && b.ingredients.length ? (
+                        b.ingredients.map((ing, idx) => (
+                          <div key={idx} style={{ display: 'flex', justifyContent: 'space-between' }}>
+                            <span>• {ing.name}</span>
+                            <b>{ing.quantity} {ing.unit || ''}</b>
+                          </div>
+                        ))
+                      ) : (
+                        <span>No ingredients specified</span>
+                      )}
+                    </div>
+
+                    <div className="batchActions">
+                      <button
+                        className="btnDoneBatch"
+                        onClick={() => {
+                          const existing = data.products.find(p => (p.name || '').toLowerCase() === (b.recipe_name || '').toLowerCase())
+                          setProdModal({
+                            batch: b,
+                            quantity: 1,
+                            price: existing ? (existing.selling_price ?? existing.price ?? '') : ''
+                          })
+                        }}
+                      >
+                        ✓ Mark as Done
+                      </button>
+                      <button
+                        className="btnCancelBatch"
+                        onClick={() => handleCancelBatch(b.id)}
+                        title="Cancel batch and restore ingredients"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <Empty>No active batches currently preparing. Build a recipe process below to start cooking.</Empty>
+            )}
+          </section>
+
+          {/* Section 2: Recipe / Process Builder */}
+          <section className="formcard" style={{ maxWidth: '100%', marginBottom: '20px' }}>
+            <h2>📝 Recipe & Process Builder</h2>
+            <p style={{ color: '#718097', fontSize: '13px', margin: '-8px 0 16px' }}>
+              Select raw ingredients from Inventory, specify quantities, and start preparation. The consumed ingredients will be automatically deducted from your stock.
+            </p>
+
+            {data.recipes.length > 0 && (
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '14px', background: '#f8fafc', padding: '10px 14px', borderRadius: '8px' }}>
+                <span style={{ fontSize: '13px', fontWeight: 600, color: '#475569' }}>Load Saved Recipe Template:</span>
+                <select
+                  style={{ width: 'auto', flex: 1, maxWidth: '280px' }}
+                  onChange={e => {
+                    const r = data.recipes.find(x => String(x.id) === e.target.value)
+                    if (r) {
+                      setRecipeName(r.name)
+                      if (r.ingredients && r.ingredients.length) {
+                        setRecipeIngredients(r.ingredients.map(i => ({ ...i })))
+                      }
+                    }
+                  }}
+                  defaultValue=""
+                >
+                  <option value="" disabled>-- Select a saved recipe --</option>
+                  {data.recipes.map(r => (
+                    <option key={r.id} value={r.id}>{r.name} ({r.ingredients?.length || 0} ingredients)</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <form onSubmit={handleStartBatch}>
+              <div style={{ marginBottom: '12px' }}>
+                <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, color: '#475569', marginBottom: '4px' }}>
+                  Product / Recipe Name:
+                </label>
+                <input
+                  value={recipeName}
+                  onChange={e => setRecipeName(e.target.value)}
+                  placeholder="e.g. Butter Croissant, Sourdough Loaf, Chocolate Muffin"
+                  required
+                />
+              </div>
+
+              <div style={{ marginBottom: '12px' }}>
+                <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, color: '#475569', marginBottom: '6px' }}>
+                  Ingredients from Inventory:
+                </label>
+                {recipeIngredients.map((row, index) => {
+                  return (
+                    <div className="recipeRow" key={index}>
+                      <select
+                        value={row.name}
+                        onChange={e => {
+                          const val = e.target.value
+                          const targetIng = data.ingredients.find(i => i.name === val)
+                          const updated = [...recipeIngredients]
+                          updated[index] = {
+                            ...updated[index],
+                            name: val,
+                            unit: targetIng?.unit || updated[index].unit
+                          }
+                          setRecipeIngredients(updated)
+                        }}
+                        required
+                        style={{ flex: 2 }}
+                      >
+                        <option value="" disabled>-- Choose ingredient --</option>
+                        {data.ingredients.map(ing => (
+                          <option key={ing.id} value={ing.name}>
+                            {ing.name} ({ing.quantity} {ing.unit || 'Piece'} in stock)
+                          </option>
+                        ))}
+                      </select>
+
+                      <input
+                        type="number"
+                        min="0.001"
+                        step="any"
+                        placeholder="Quantity"
+                        value={row.quantity}
+                        onChange={e => {
+                          const updated = [...recipeIngredients]
+                          updated[index] = { ...updated[index], quantity: e.target.value }
+                          setRecipeIngredients(updated)
+                        }}
+                        style={{ width: '100px' }}
+                        required
+                      />
+
+                      <select
+                        value={row.unit}
+                        onChange={e => {
+                          const updated = [...recipeIngredients]
+                          updated[index] = { ...updated[index], unit: e.target.value }
+                          setRecipeIngredients(updated)
+                        }}
+                        style={{ width: '100px' }}
+                      >
+                        <option>Piece</option>
+                        <option>Kg</option>
+                        <option>Gram</option>
+                        <option>Litre</option>
+                        <option>Box</option>
+                        <option>Pack</option>
+                      </select>
+
+                      {recipeIngredients.length > 1 && (
+                        <button
+                          type="button"
+                          className="btnDelete"
+                          onClick={() => setRecipeIngredients(recipeIngredients.filter((_, i) => i !== index))}
+                          style={{ padding: '8px 12px' }}
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  )
+                })}
+
+                <button
+                  type="button"
+                  onClick={() => setRecipeIngredients([...recipeIngredients, { name: '', quantity: 1, unit: 'Kg' }])}
+                  style={{
+                    background: '#f1f5f9',
+                    color: '#475569',
+                    border: '1px dashed #cbd5e1',
+                    borderRadius: '6px',
+                    padding: '8px 14px',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    marginTop: '6px'
+                  }}
+                >
+                  + Add Ingredient
+                </button>
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', marginTop: '16px' }}>
+                <button
+                  type="submit"
+                  style={{ background: '#6856d8', color: '#fff', border: 0, padding: '12px 20px', borderRadius: '8px', fontWeight: 700, cursor: 'pointer' }}
+                >
+                  🍳 Start Preparing (Mark Batch as Preparing)
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveRecipeTemplate}
+                  style={{ background: '#f8fafc', border: '1px solid #dce2eb', color: '#475569', padding: '12px 16px', borderRadius: '8px', fontWeight: 700, cursor: 'pointer' }}
+                >
+                  💾 Save as Recipe Template
+                </button>
+              </div>
+            </form>
+          </section>
+
+          {/* Section 3: Completed Production Batches */}
+          <section className="tablecard">
+            <h2 style={{ padding: '16px 18px 0', margin: 0, fontSize: '16px' }}>📋 Production History</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th>Completed Date</th>
+                  <th>Product</th>
+                  <th>Produced Quantity</th>
+                  <th>Ingredients Used</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {completedBatches.length ? (
+                  completedBatches.map(b => (
+                    <tr key={b.id}>
+                      <td>{fmt(b.completed_at || b.started_at)}</td>
+                      <td><b>{b.recipe_name}</b></td>
+                      <td>
+                        <b style={{ color: '#15803d' }}>+{b.produced_quantity || 0} Pieces</b>
+                      </td>
+                      <td>
+                        <span style={{ fontSize: '12px', color: '#64748b' }}>
+                          {(b.ingredients || []).map(i => `${i.quantity} ${i.unit || ''} ${i.name}`).join(', ') || '—'}
+                        </span>
+                      </td>
+                      <td>
+                        <span className={b.status === 'Completed' ? 'statusCompleted' : 'statusCancelled'}>
+                          {b.status === 'Completed' ? '✓ Added to Packed Items' : 'Cancelled'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr><td colSpan={5}><Empty>No completed production batches yet.</Empty></td></tr>
+                )}
+              </tbody>
+            </table>
+          </section>
+        </Layout>
+      )
+    },
     'Product Purchase': () => (
       <Layout title="Product Purchase">
         <Form title="Record product purchase (Stores in Ingredients)" onSubmit={addPurchase}>
@@ -1356,6 +1748,65 @@ function Restaurant({ business }) {
                   onClick={() => setReceiptModal(null)}
                 >
                   ➕ Next Bill
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {prodModal && (
+          <div className="receiptModal" onClick={() => setProdModal(null)}>
+            <div className="receiptBox" onClick={e => e.stopPropagation()}>
+              <h2><span>🥐</span> Batch Ready: {prodModal.batch.recipe_name}</h2>
+              <p style={{ color: '#718097', margin: '4px 0 16px', fontSize: '13px' }}>
+                Cooking / baking is finished! Specify how many finished units were produced to add to <b>Packed Items</b> for <b>Billing / POS</b>.
+              </p>
+
+              <div style={{ display: 'grid', gap: '12px', marginBottom: '18px' }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, color: '#475569', marginBottom: '4px' }}>
+                    How many finished quantity were produced? *
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={prodModal.quantity}
+                    onChange={e => setProdModal({ ...prodModal, quantity: e.target.value })}
+                    placeholder="e.g. 24"
+                    autoFocus
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, color: '#475569', marginBottom: '4px' }}>
+                    Selling price ₹ (per unit):
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    value={prodModal.price}
+                    onChange={e => setProdModal({ ...prodModal, price: e.target.value })}
+                    placeholder="e.g. 120"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="receiptActions">
+                <button
+                  className="printBtn"
+                  style={{ background: '#16a34a' }}
+                  onClick={handleCompleteBatch}
+                >
+                  ✓ Confirm & Add to Packed Items
+                </button>
+                <button
+                  className="newBillBtn"
+                  onClick={() => setProdModal(null)}
+                >
+                  Cancel
                 </button>
               </div>
             </div>
