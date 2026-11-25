@@ -101,6 +101,8 @@ function Admin() {
   const [note, setNote] = useState('')
   const [updatingId, setUpdatingId] = useState(null)
   const [showConfig, setShowConfig] = useState(false)
+  const [editingId, setEditingId] = useState(null)
+  const [editForm, setEditForm] = useState({ name: '', duration: 'keep', customDate: '', unlimited: false })
   const isDesktop = typeof window !== 'undefined' && window.location.protocol === 'file:'
   const [apiBaseUrl, setApiBaseUrl] = useState(() => {
     return (import.meta.env.VITE_API_BASE_URL || localStorage.getItem('crumb-api-base-url') || 'https://crumb-snowy.vercel.app').trim()
@@ -137,11 +139,6 @@ function Admin() {
     setNote('')
     const endpoint = getApiEndpoint('/api/create-user')
 
-    if (isDesktop && !apiBaseUrl.trim() && endpoint.startsWith('/')) {
-      setNote('Please enter your deployed Vercel URL below so the desktop app can connect to your workspace creation API.')
-      return
-    }
-
     try {
       let { data: { session } } = await supabase.auth.getSession()
       let r = await fetch(endpoint, {
@@ -169,41 +166,59 @@ function Admin() {
     }
   }
 
-  async function handleUpdateAccess(b) {
-    const sel = durations[b.business_id] || '30'
-    const custom = customDates[b.business_id]
-    setUpdatingId(b.business_id)
+  function handleStartEdit(x) {
+    setEditingId(x.business_id)
+    setEditForm({
+      name: x.business_name || '',
+      duration: 'keep',
+      customDate: x.access_ends_at ? x.access_ends_at.slice(0, 10) : '',
+      unlimited: !x.access_ends_at
+    })
     setNote('')
+  }
 
-    let newEndsAt
-    if (sel === 'custom') {
-      if (!custom) {
-        setNote('Please select a custom expiration date.')
-        setUpdatingId(null)
+  async function saveWorkspaceEdit(businessId) {
+    const trimmedName = editForm.name.trim()
+    if (!trimmedName) {
+      setNote('Workspace name cannot be empty.')
+      return
+    }
+
+    const currentBiz = bs.find(b => b.business_id === businessId)
+    let newEndsAt = currentBiz?.access_ends_at
+
+    if (editForm.unlimited || editForm.duration === 'unlimited') {
+      newEndsAt = null
+    } else if (editForm.duration === 'custom') {
+      if (!editForm.customDate) {
+        setNote('Please select an expiration date.')
         return
       }
-      newEndsAt = new Date(custom + 'T23:59:59').toISOString()
-    } else {
-      const days = Number(sel)
-      const base = b.access_ends_at && new Date(b.access_ends_at) > new Date()
-        ? new Date(b.access_ends_at).getTime()
+      newEndsAt = new Date(editForm.customDate + 'T23:59:59').toISOString()
+    } else if (editForm.duration !== 'keep') {
+      const days = Number(editForm.duration)
+      const base = currentBiz?.access_ends_at && new Date(currentBiz.access_ends_at) > new Date()
+        ? new Date(currentBiz.access_ends_at).getTime()
         : Date.now()
       newEndsAt = new Date(base + days * 86400000).toISOString()
     }
 
+    setUpdatingId(businessId)
+    setNote('')
+
     try {
-      let { error: rpcErr } = await supabase.rpc('update_workspace_access', {
-        target_business_id: b.business_id,
-        new_access_ends_at: newEndsAt
-      })
+      let { error: directErr } = await supabase
+        .from('businesses')
+        .update({ name: trimmedName, access_ends_at: newEndsAt })
+        .eq('id', businessId)
 
-      if (rpcErr) {
-        let { error: directErr } = await supabase
-          .from('businesses')
-          .update({ access_ends_at: newEndsAt })
-          .eq('id', b.business_id)
-
-        if (directErr) {
+      if (directErr) {
+        let { error: rpcErr } = await supabase.rpc('update_workspace', {
+          target_business_id: businessId,
+          new_name: trimmedName,
+          new_access_ends_at: newEndsAt
+        })
+        if (rpcErr) {
           const endpoint = getApiEndpoint('/api/create-user')
           const { data: { session } } = await supabase.auth.getSession()
           const res = await fetch(endpoint, {
@@ -213,20 +228,116 @@ function Admin() {
               Authorization: `Bearer ${session?.access_token}`
             },
             body: JSON.stringify({
-              action: 'update-access',
-              businessId: b.business_id,
+              action: 'update-workspace',
+              businessId,
+              businessName: trimmedName,
               accessEndsAt: newEndsAt
             })
           })
           const out = await res.json().catch(() => ({}))
-          if (!res.ok) throw new Error(out.error || 'Failed to update access duration')
+          if (!res.ok) throw new Error(out.error || 'Failed to update workspace')
         }
       }
 
-      setNote(`Access for "${b.business_name}" updated until ${fmt(newEndsAt)}.`)
+      setNote(`Workspace "${trimmedName}" updated successfully.`)
+      setEditingId(null)
       await load()
     } catch (err) {
-      setNote(err.message || 'Error updating access.')
+      setNote(`Update failed: ${err.message}`)
+    } finally {
+      setUpdatingId(null)
+    }
+  }
+
+  async function handleStopAccess(x) {
+    if (!window.confirm(`Stop access for "${x.business_name}" immediately? Users active in this workspace will be disconnected instantly.`)) {
+      return
+    }
+
+    const stoppedAt = new Date(Date.now() - 5000).toISOString()
+    setUpdatingId(x.business_id)
+    setNote('')
+
+    try {
+      let { error: directErr } = await supabase
+        .from('businesses')
+        .update({ access_ends_at: stoppedAt })
+        .eq('id', x.business_id)
+
+      if (directErr) {
+        let { error: rpcErr } = await supabase.rpc('stop_workspace_access', {
+          target_business_id: x.business_id
+        })
+        if (rpcErr) {
+          const endpoint = getApiEndpoint('/api/create-user')
+          const { data: { session } } = await supabase.auth.getSession()
+          const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${session?.access_token}`
+            },
+            body: JSON.stringify({
+              action: 'stop-access',
+              businessId: x.business_id
+            })
+          })
+          const out = await res.json().catch(() => ({}))
+          if (!res.ok) throw new Error(out.error || 'Failed to stop workspace access')
+        }
+      }
+
+      setNote(`Access for "${x.business_name}" has been stopped abruptly.`)
+      await load()
+    } catch (err) {
+      setNote(`Stop access failed: ${err.message}`)
+    } finally {
+      setUpdatingId(null)
+    }
+  }
+
+  async function handleDeleteWorkspace(x) {
+    if (!window.confirm(`Are you sure you want to PERMANENTLY delete workspace "${x.business_name}"?\n\nThis will remove the workspace and all its members from Supabase.`)) {
+      return
+    }
+
+    setUpdatingId(x.business_id)
+    setNote('')
+
+    try {
+      await supabase.from('business_members').delete().eq('business_id', x.business_id)
+      let { error: directErr } = await supabase
+        .from('businesses')
+        .delete()
+        .eq('id', x.business_id)
+
+      if (directErr) {
+        let { error: rpcErr } = await supabase.rpc('delete_workspace', {
+          target_business_id: x.business_id
+        })
+        if (rpcErr) {
+          const endpoint = getApiEndpoint('/api/create-user')
+          const { data: { session } } = await supabase.auth.getSession()
+          const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${session?.access_token}`
+            },
+            body: JSON.stringify({
+              action: 'delete-workspace',
+              businessId: x.business_id
+            })
+          })
+          const out = await res.json().catch(() => ({}))
+          if (!res.ok) throw new Error(out.error || 'Failed to delete workspace')
+        }
+      }
+
+      setNote(`Workspace "${x.business_name}" deleted permanently.`)
+      await load()
+    } catch (err) {
+      setNote(`Delete failed: ${err.message}`)
     } finally {
       setUpdatingId(null)
     }
@@ -325,57 +436,148 @@ function Admin() {
         <table>
           <thead>
             <tr>
-              <th>Business</th>
-              <th>Current Access</th>
-              <th>Update Access in Workspace</th>
+              <th style={{ minWidth: '220px' }}>Workspace / Business</th>
+              <th style={{ minWidth: '190px' }}>Access Status</th>
+              <th style={{ minWidth: '280px' }}>Workspace Actions</th>
             </tr>
           </thead>
           <tbody>
             {bs.length ? (
               bs.map(x => {
+                const isEditing = editingId === x.business_id
                 const isExpired = x.access_ends_at && new Date(x.access_ends_at) <= new Date()
-                const sel = durations[x.business_id] || '30'
+                const isBusy = updatingId === x.business_id
+
+                if (isEditing) {
+                  return (
+                    <tr key={x.business_id} style={{ background: '#fdfcfe' }}>
+                      <td>
+                        <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#6856d8', marginBottom: '4px' }}>
+                          Edit Workspace Name:
+                        </label>
+                        <input
+                          value={editForm.name}
+                          onChange={e => setEditForm({ ...editForm, name: e.target.value })}
+                          placeholder="Workspace name"
+                          required
+                          style={{ minWidth: '180px' }}
+                        />
+                      </td>
+                      <td>
+                        <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#6856d8', marginBottom: '4px' }}>
+                          Edit Access Duration:
+                        </label>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                          <select
+                            value={editForm.duration}
+                            onChange={e => setEditForm({
+                              ...editForm,
+                              duration: e.target.value,
+                              unlimited: e.target.value === 'unlimited'
+                            })}
+                          >
+                            <option value="keep">Keep current access</option>
+                            <option value="7">+7 days extension</option>
+                            <option value="30">+30 days extension</option>
+                            <option value="90">+90 days extension</option>
+                            <option value="180">+6 months extension</option>
+                            <option value="365">+1 year extension</option>
+                            <option value="custom">Pick exact expiry date…</option>
+                            <option value="unlimited">No expiration (Unlimited)</option>
+                          </select>
+                          {editForm.duration === 'custom' && (
+                            <input
+                              type="date"
+                              value={editForm.customDate}
+                              onChange={e => setEditForm({ ...editForm, customDate: e.target.value })}
+                              required
+                            />
+                          )}
+                        </div>
+                      </td>
+                      <td>
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '16px' }}>
+                          <button
+                            className="btnSave"
+                            disabled={isBusy}
+                            onClick={() => saveWorkspaceEdit(x.business_id)}
+                          >
+                            {isBusy ? 'Saving…' : 'Save'}
+                          </button>
+                          <button
+                            className="btnCancel"
+                            disabled={isBusy}
+                            onClick={() => setEditingId(null)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                }
+
                 return (
                   <tr key={x.business_id}>
-                    <td><b>{x.business_name}</b></td>
+                    <td>
+                      <b style={{ fontSize: '15px', color: '#1e293b' }}>{x.business_name}</b>
+                      <br />
+                      <small style={{ color: '#64748b' }}>Created {fmt(x.created_at)}</small>
+                    </td>
                     <td>
                       {x.access_ends_at ? (
                         isExpired ? (
-                          <span style={{ color: '#e85968', fontWeight: 600 }}>Expired ({fmt(x.access_ends_at)})</span>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '4px 10px', background: '#fef2f2', color: '#dc2626', border: '1px solid #fecaca', borderRadius: '6px', fontWeight: 700, fontSize: '12px' }}>
+                            ⛔ Expired / Stopped ({fmt(x.access_ends_at)})
+                          </span>
                         ) : (
-                          <span style={{ color: '#17a971', fontWeight: 600 }}>Active until {fmt(x.access_ends_at)}</span>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '4px 10px', background: '#ecfdf5', color: '#059669', border: '1px solid #a7f3d0', borderRadius: '6px', fontWeight: 700, fontSize: '12px' }}>
+                            🟢 Active until {fmt(x.access_ends_at)}
+                          </span>
                         )
                       ) : (
-                        <span style={{ color: '#718097' }}>No limit</span>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '4px 10px', background: '#f8fafc', color: '#475569', border: '1px solid #cbd5e1', borderRadius: '6px', fontWeight: 600, fontSize: '12px' }}>
+                          ♾️ No limit
+                        </span>
                       )}
                     </td>
                     <td>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                        <select
-                          value={sel}
-                          onChange={e => setDurations({ ...durations, [x.business_id]: e.target.value })}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                        <button
+                          className="btnEdit"
+                          disabled={isBusy}
+                          onClick={() => handleStartEdit(x)}
+                          title="Edit workspace name & access expiration"
                         >
-                          <option value="7">+7 days</option>
-                          <option value="30">+30 days</option>
-                          <option value="90">+90 days</option>
-                          <option value="180">+6 months</option>
-                          <option value="365">+1 year</option>
-                          <option value="custom">Pick date…</option>
-                        </select>
-                        {sel === 'custom' && (
-                          <input
-                            type="date"
-                            value={customDates[x.business_id] || ''}
-                            onChange={e => setCustomDates({ ...customDates, [x.business_id]: e.target.value })}
-                            required
-                          />
+                          ✏️ Edit
+                        </button>
+                        {!isExpired ? (
+                          <button
+                            className="btnStop"
+                            disabled={isBusy}
+                            onClick={() => handleStopAccess(x)}
+                            title="Abruptly stop client access right now"
+                          >
+                            ⛔ Stop Access
+                          </button>
+                        ) : (
+                          <button
+                            className="tableActionBtn"
+                            style={{ padding: '6px 12px', fontSize: '12px' }}
+                            disabled={isBusy}
+                            onClick={() => handleStartEdit(x)}
+                            title="Renew expired access"
+                          >
+                            ▶️ Renew
+                          </button>
                         )}
                         <button
-                          className="tableActionBtn"
-                          disabled={updatingId === x.business_id}
-                          onClick={() => handleUpdateAccess(x)}
+                          className="btnDelete"
+                          disabled={isBusy}
+                          onClick={() => handleDeleteWorkspace(x)}
+                          title="Permanently delete workspace and its members"
                         >
-                          {updatingId === x.business_id ? 'Updating…' : (isExpired ? 'Renew access' : 'Extend access')}
+                          🗑️ Delete
                         </button>
                       </div>
                     </td>

@@ -19,20 +19,58 @@ export default async function handler(req, res) {
   const { data: isPlatformAdmin, error: roleError } = await authClient.rpc('is_platform_administrator')
   if (roleError || !isPlatformAdmin) return res.status(403).json({ error: 'Platform administrator access required.' })
   const admin = createClient(url, serviceKey)
-  const { email, password, businessId, businessName, role, accessDays, accessEndsAt, action = 'user' } = req.body || {}
+  const { email, password, businessId, businessName, name, role, accessDays, accessEndsAt, action = 'user' } = req.body || {}
 
-  if (action === 'update-access') {
+  if (action === 'update-workspace' || action === 'update-access') {
     if (!businessId) return res.status(400).json({ error: 'Workspace ID is required.' })
-    let newEnd = accessEndsAt
-    if (!newEnd && accessDays) {
-      const { data: b } = await admin.from('businesses').select('access_ends_at').eq('id', businessId).single()
-      const base = b?.access_ends_at && new Date(b.access_ends_at) > new Date() ? new Date(b.access_ends_at).getTime() : Date.now()
-      newEnd = new Date(base + Number(accessDays) * 86400000).toISOString()
+    const updates = {}
+    const newName = (businessName || name || '').trim()
+    if (newName) updates.name = newName
+
+    if (accessEndsAt !== undefined) {
+      updates.access_ends_at = accessEndsAt
+    } else if (accessDays) {
+      if (accessDays === 'unlimited') {
+        updates.access_ends_at = null
+      } else {
+        const { data: b } = await admin.from('businesses').select('access_ends_at').eq('id', businessId).single()
+        const base = b?.access_ends_at && new Date(b.access_ends_at) > new Date() ? new Date(b.access_ends_at).getTime() : Date.now()
+        updates.access_ends_at = new Date(base + Number(accessDays) * 86400000).toISOString()
+      }
     }
-    if (!newEnd) return res.status(400).json({ error: 'Valid duration or end date is required.' })
-    const { error: updateError } = await admin.from('businesses').update({ access_ends_at: newEnd }).eq('id', businessId)
+
+    if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No fields provided to update.' })
+
+    const { error: updateError } = await admin.from('businesses').update(updates).eq('id', businessId)
     if (updateError) return res.status(400).json({ error: updateError.message })
-    return res.status(200).json({ message: 'Access updated successfully.', access_ends_at: newEnd })
+    return res.status(200).json({ message: 'Workspace updated successfully.', updates })
+  }
+
+  if (action === 'stop-access') {
+    if (!businessId) return res.status(400).json({ error: 'Workspace ID is required.' })
+    const stoppedAt = new Date(Date.now() - 5000).toISOString()
+    const { error: stopError } = await admin.from('businesses').update({ access_ends_at: stoppedAt }).eq('id', businessId)
+    if (stopError) return res.status(400).json({ error: stopError.message })
+    return res.status(200).json({ message: 'Workspace access stopped immediately.', access_ends_at: stoppedAt })
+  }
+
+  if (action === 'delete-workspace') {
+    if (!businessId) return res.status(400).json({ error: 'Workspace ID is required.' })
+    try {
+      // Clean up child tables if any records exist in supabase
+      await admin.from('business_members').delete().eq('business_id', businessId)
+      await admin.from('sale_items').delete().eq('business_id', businessId).catch(() => {})
+      await admin.from('sales').delete().eq('business_id', businessId).catch(() => {})
+      await admin.from('purchases').delete().eq('business_id', businessId).catch(() => {})
+      await admin.from('expenses').delete().eq('business_id', businessId).catch(() => {})
+      await admin.from('products').delete().eq('business_id', businessId).catch(() => {})
+
+      const { error: deleteError } = await admin.from('businesses').delete().eq('id', businessId)
+      if (deleteError) return res.status(400).json({ error: deleteError.message })
+      return res.status(200).json({ message: 'Workspace deleted permanently.' })
+    } catch (err) {
+      return res.status(500).json({ error: err.message || 'Failed to delete workspace.' })
+    }
   }
 
   if (!email || !password || !['owner', 'admin', 'staff'].includes(role)) return res.status(400).json({ error: 'Email, password, and role are required.' })
