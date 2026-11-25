@@ -147,7 +147,7 @@ export async function openLocalDb() {
     'cold coffee': 140
   }
 
-  // Seed default packed items if completely empty
+  // Seed default packed items if completely empty or missing base items
   if (!db.products || db.products.length === 0) {
     db.products = [
       { id: 1, name: 'Butter Croissant', price: 95, selling_price: 95, quantity: 25 },
@@ -158,6 +158,8 @@ export async function openLocalDb() {
       { id: 6, name: 'Cold Coffee', price: 140, selling_price: 140, quantity: 25 }
     ]
     db.counters.products = 6
+  } else if (!db.products.some(p => (p.name || '').toLowerCase().includes('butter croissant'))) {
+    db.products.unshift({ id: 1, name: 'Butter Croissant', price: 95, selling_price: 95, quantity: 25 })
   }
 
   // Normalize legacy data fields and heal missing prices
