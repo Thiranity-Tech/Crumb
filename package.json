@@ -4,8 +4,52 @@
   "version": "1.0.0",
   "type": "module",
   "main": "electron/main.cjs",
-  "scripts": {"dev": "vite", "build": "vite build", "preview": "vite preview", "desktop": "npm run build && electron .", "package:win": "npm run build && electron-builder --win portable"},
-  "dependencies": {"@supabase/supabase-js": "^2.57.4", "lucide-react": "^0.468.0", "react": "^18.3.1", "react-dom": "^18.3.1"},
-  "devDependencies": {"@vitejs/plugin-react": "^4.3.4", "electron": "^37.2.6", "electron-builder": "^26.0.12", "vite": "^6.0.5"},
-  "build": {"appId":"com.thiranity.crumb","productName":"Crumb ERP","files":["dist/**/*","electron/**/*","package.json"],"win":{"target":"portable"}}
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "desktop": "npm run build && electron .",
+    "package:win": "npm run build && electron-builder --win"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.4",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^37.2.6",
+    "electron-builder": "^26.0.12",
+    "vite": "^6.0.5"
+  },
+  "build": {
+    "appId": "com.thiranity.crumb",
+    "productName": "Crumb ERP",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "build/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Crumb ERP",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico"
+    }
+  }
 }

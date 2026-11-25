@@ -12,7 +12,22 @@ export default async function handler(req, res) {
   const { data: isPlatformAdmin, error: roleError } = await authClient.rpc('is_platform_administrator')
   if (roleError || !isPlatformAdmin) return res.status(403).json({ error: 'Platform administrator access required.' })
   const admin = createClient(url, serviceKey)
-  const { email, password, businessId, businessName, role, accessDays, action = 'user' } = req.body || {}
+  const { email, password, businessId, businessName, role, accessDays, accessEndsAt, action = 'user' } = req.body || {}
+
+  if (action === 'update-access') {
+    if (!businessId) return res.status(400).json({ error: 'Workspace ID is required.' })
+    let newEnd = accessEndsAt
+    if (!newEnd && accessDays) {
+      const { data: b } = await admin.from('businesses').select('access_ends_at').eq('id', businessId).single()
+      const base = b?.access_ends_at && new Date(b.access_ends_at) > new Date() ? new Date(b.access_ends_at).getTime() : Date.now()
+      newEnd = new Date(base + Number(accessDays) * 86400000).toISOString()
+    }
+    if (!newEnd) return res.status(400).json({ error: 'Valid duration or end date is required.' })
+    const { error: updateError } = await admin.from('businesses').update({ access_ends_at: newEnd }).eq('id', businessId)
+    if (updateError) return res.status(400).json({ error: updateError.message })
+    return res.status(200).json({ message: 'Access updated successfully.', access_ends_at: newEnd })
+  }
+
   if (!email || !password || !['owner', 'admin', 'staff'].includes(role)) return res.status(400).json({ error: 'Email, password, and role are required.' })
   if (action === 'workspace' && (!businessName?.trim() || !Number(accessDays) || Number(accessDays) < 1)) return res.status(400).json({ error: 'Workspace name and access duration are required.' })
   if (action !== 'workspace' && !businessId) return res.status(400).json({ error: 'Workspace is required.' })
@@ -20,8 +35,8 @@ export default async function handler(req, res) {
   if (createError) return res.status(400).json({ error: createError.message })
   let workspaceId = businessId
   if (action === 'workspace') {
-    const accessEndsAt = new Date(Date.now() + Number(accessDays) * 86400000).toISOString()
-    const { data: workspace, error: workspaceError } = await admin.from('businesses').insert({ name: businessName.trim(), owner_id: created.user.id, access_ends_at: accessEndsAt }).select().single()
+    const accessEndsAtCalc = new Date(Date.now() + Number(accessDays) * 86400000).toISOString()
+    const { data: workspace, error: workspaceError } = await admin.from('businesses').insert({ name: businessName.trim(), owner_id: created.user.id, access_ends_at: accessEndsAtCalc }).select().single()
     if (workspaceError) { await admin.auth.admin.deleteUser(created.user.id); return res.status(400).json({ error: workspaceError.message }) }
     workspaceId = workspace.id
   }
