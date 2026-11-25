@@ -5,11 +5,13 @@ const blank = () => ({
   ingredients: [],
   recipes: [],
   production_batches: [],
+  employees: [],
+  attendance: [],
   purchases: [],
   expenses: [],
   sales: [],
   sale_items: [],
-  counters: { products: 0, ingredients: 0, recipes: 0, production_batches: 0, purchases: 0, expenses: 0, sales: 0, sale_items: 0 }
+  counters: { products: 0, ingredients: 0, recipes: 0, production_batches: 0, employees: 0, attendance: 0, purchases: 0, expenses: 0, sales: 0, sale_items: 0 }
 })
 
 function syncIngredientFromPurchase(pu) {
@@ -111,11 +113,13 @@ export async function openLocalDb() {
   db.ingredients = db.ingredients || []
   db.recipes = db.recipes || []
   db.production_batches = db.production_batches || []
+  db.employees = db.employees || []
+  db.attendance = db.attendance || []
   db.purchases = db.purchases || []
   db.expenses = db.expenses || []
   db.sales = db.sales || []
   db.sale_items = db.sale_items || []
-  db.counters = db.counters || { products: 0, ingredients: 0, recipes: 0, production_batches: 0, purchases: 0, expenses: 0, sales: 0, sale_items: 0 }
+  db.counters = db.counters || { products: 0, ingredients: 0, recipes: 0, production_batches: 0, employees: 0, attendance: 0, purchases: 0, expenses: 0, sales: 0, sale_items: 0 }
   if (db.counters.ingredients == null) {
     db.counters.ingredients = db.ingredients.length ? Math.max(...db.ingredients.map(x => Number(x.id) || 0)) : 0
   }
@@ -124,6 +128,12 @@ export async function openLocalDb() {
   }
   if (db.counters.production_batches == null) {
     db.counters.production_batches = db.production_batches.length ? Math.max(...db.production_batches.map(x => Number(x.id) || 0)) : 0
+  }
+  if (db.counters.employees == null) {
+    db.counters.employees = db.employees.length ? Math.max(...db.employees.map(x => Number(x.id) || 0)) : 0
+  }
+  if (db.counters.attendance == null) {
+    db.counters.attendance = db.attendance.length ? Math.max(...db.attendance.map(x => Number(x.id) || 0)) : 0
   }
 
   const isValidDt = d => d && typeof d === 'string' && !d.includes('Invalid') && !isNaN(new Date(d).getTime())
@@ -209,6 +219,9 @@ export async function query(sql) {
   if (sql.includes('order by name')) {
     rows.sort((a, b) => (a.name || '').localeCompare(b.name || ''))
   }
+  if (sql.includes('order by date')) {
+    rows.sort((a, b) => String(b.date || b.created_at || '').localeCompare(String(a.date || a.created_at || '')))
+  }
   if (sql.includes('order by purchased_at') || sql.includes('order by expense_at') || sql.includes('order by sold_at') || sql.includes('order by updated_at') || sql.includes('order by started_at') || sql.includes('order by created_at')) {
     rows.sort((a, b) => String(b.started_at || b.created_at || b.purchased_at || b.expense_at || b.sold_at || b.updated_at || '').localeCompare(String(a.started_at || a.created_at || a.purchased_at || a.expense_at || a.sold_at || a.updated_at || '')))
   }
@@ -239,6 +252,15 @@ export async function execute(sql, params = []) {
     row.status = row.status || 'Preparing'
     row.started_at = row.started_at || new Date().toISOString()
     row.produced_quantity = Number(row.produced_quantity || 0)
+  } else if (t === 'employees') {
+    row.name = (row.name || '').trim()
+    row.job = (row.job || '').trim()
+    row.phone = (row.phone || '').trim()
+    row.created_at = row.created_at || new Date().toISOString()
+  } else if (t === 'attendance') {
+    row.created_at = row.created_at || new Date().toISOString()
+    row.date = row.date || new Date().toISOString().split('T')[0]
+    row.status = row.status || 'Full day'
   } else if (t === 'purchases') {
     row.total_cost = Number(row.total_cost || row.cost || 0)
     row.cost = row.total_cost
@@ -277,6 +299,20 @@ export async function updateRecord(table, id, data) {
       if (data.status != null) updated.status = data.status
       if (data.completed_at != null) updated.completed_at = data.completed_at
       if (data.produced_quantity != null) updated.produced_quantity = Number(data.produced_quantity)
+    } else if (table === 'employees') {
+      if (data.name != null) updated.name = data.name.trim()
+      if (data.job != null) updated.job = data.job.trim()
+      if (data.phone != null) updated.phone = data.phone.trim()
+      if (data.name && old.name !== updated.name && db.attendance) {
+        db.attendance.forEach(att => {
+          if (String(att.employee_id) === String(id)) att.employee_name = updated.name
+        })
+      }
+    } else if (table === 'attendance') {
+      if (data.employee_id != null) updated.employee_id = data.employee_id
+      if (data.employee_name != null) updated.employee_name = data.employee_name
+      if (data.date != null) updated.date = data.date
+      if (data.status != null) updated.status = data.status
     } else if (table === 'ingredients') {
       if (data.quantity != null) updated.quantity = Number(data.quantity)
       if (data.total_cost != null) updated.total_cost = Number(data.total_cost)

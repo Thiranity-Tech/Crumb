@@ -117,7 +117,19 @@ function Admin() {
     else setBs(data || [])
   }
 
-  useEffect(() => { load() }, [])
+  useEffect(() => {
+    load()
+    if (!supabase) return
+    const channel = supabase
+      .channel('platform-businesses-live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'businesses' }, () => {
+        load()
+      })
+      .subscribe()
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [])
 
   async function send(e) {
     e.preventDefault()
@@ -363,6 +375,8 @@ function Restaurant({ business }) {
     ingredients: [],
     recipes: [],
     production_batches: [],
+    employees: [],
+    attendance: [],
     purchases: [],
     expenses: [],
     sales: [],
@@ -378,6 +392,8 @@ function Restaurant({ business }) {
   const [editIng, setEditIng] = useState(null)
   const [editPurchase, setEditPurchase] = useState(null)
   const [editExpense, setEditExpense] = useState(null)
+  const [editEmployee, setEditEmployee] = useState(null)
+  const [editAttendance, setEditAttendance] = useState(null)
   const [receiptModal, setReceiptModal] = useState(null)
   const [autoPrint, setAutoPrint] = useState(false)
 
@@ -387,17 +403,19 @@ function Restaurant({ business }) {
   const [recipeIngredients, setRecipeIngredients] = useState([{ name: '', quantity: 1, unit: 'Kg' }])
 
   async function load() {
-    let [products, ingredients, recipes, production_batches, purchases, expenses, sales, items] = await Promise.all([
+    let [products, ingredients, recipes, production_batches, employees, attendance, purchases, expenses, sales, items] = await Promise.all([
       query('select * from products order by name'),
       query('select * from ingredients order by name'),
       query('select * from recipes order by name'),
       query('select * from production_batches order by started_at desc'),
+      query('select * from employees order by name'),
+      query('select * from attendance order by date desc'),
       query('select * from purchases order by purchased_at desc'),
       query('select * from expenses order by expense_at desc'),
       query('select * from sales order by sold_at desc'),
       query('select * from sale_items')
     ])
-    setData({ products, ingredients, recipes, production_batches, purchases, expenses, sales, items })
+    setData({ products, ingredients, recipes, production_batches, employees, attendance, purchases, expenses, sales, items })
     setCart(prev => prev.filter(c => products.some(p => String(p.id) === String(c.id))))
   }
 
@@ -530,6 +548,77 @@ function Restaurant({ business }) {
     if (!window.confirm('Delete this ingredient from inventory?')) return
     await deleteRecord('ingredients', id)
     if (editIng?.id === id) setEditIng(null)
+    await load()
+  }
+
+  async function addEmployee(e) {
+    e.preventDefault()
+    let f = new FormData(e.target)
+    await execute('insert into employees(name,job,phone,created_at) values(?,?,?,?)', [
+      f.get('name')?.toString().trim(),
+      f.get('job')?.toString().trim(),
+      f.get('phone')?.toString().trim(),
+      new Date().toISOString()
+    ])
+    e.target.reset()
+    await load()
+  }
+
+  async function saveEmployeeEdit(id) {
+    if (!editEmployee || !editEmployee.name.trim()) return
+    await updateRecord('employees', id, {
+      name: editEmployee.name.trim(),
+      job: (editEmployee.job || '').trim(),
+      phone: (editEmployee.phone || '').trim()
+    })
+    setEditEmployee(null)
+    await load()
+  }
+
+  async function deleteEmployee(id) {
+    if (!window.confirm('Delete this employee?')) return
+    await deleteRecord('employees', id)
+    if (editEmployee?.id === id) setEditEmployee(null)
+    await load()
+  }
+
+  async function addAttendance(e) {
+    e.preventDefault()
+    let f = new FormData(e.target)
+    const empId = f.get('employee_id')
+    const emp = data.employees.find(x => String(x.id) === String(empId))
+    const empName = emp ? emp.name : 'Staff'
+    const dateVal = f.get('date') || new Date().toISOString().split('T')[0]
+    const statusVal = f.get('status') || 'Full day'
+
+    await execute('insert into attendance(employee_id,employee_name,date,status,created_at) values(?,?,?,?,?)', [
+      empId,
+      empName,
+      dateVal,
+      statusVal,
+      new Date().toISOString()
+    ])
+    e.target.reset()
+    await load()
+  }
+
+  async function saveAttendanceEdit(id) {
+    if (!editAttendance) return
+    const emp = data.employees.find(x => String(x.id) === String(editAttendance.employee_id))
+    await updateRecord('attendance', id, {
+      employee_id: editAttendance.employee_id,
+      employee_name: emp ? emp.name : editAttendance.employee_name,
+      date: editAttendance.date,
+      status: editAttendance.status
+    })
+    setEditAttendance(null)
+    await load()
+  }
+
+  async function deleteAttendance(id) {
+    if (!window.confirm('Delete this attendance record?')) return
+    await deleteRecord('attendance', id)
+    if (editAttendance?.id === id) setEditAttendance(null)
     await load()
   }
 
@@ -1571,6 +1660,253 @@ function Restaurant({ business }) {
         </section>
       </Layout>
     ),
+    Employees: () => (
+      <Layout title="Employees">
+        <Form title="Add Employee" onSubmit={addEmployee}>
+          <input name="name" placeholder="Employee full name" required />
+          <input name="job" placeholder="Job title / role (e.g. Baker, Chef, Cashier)" required />
+          <input name="phone" placeholder="Contact number" type="tel" required />
+        </Form>
+        <section className="tablecard">
+          <table>
+            <thead>
+              <tr>
+                <th>Employee Name</th>
+                <th>Job Title / Role</th>
+                <th>Contact Number</th>
+                <th style={{ width: '180px' }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.employees.length ? (
+                data.employees.map(emp => {
+                  const isEditing = editEmployee?.id === emp.id
+                  return (
+                    <tr key={emp.id}>
+                      <td>
+                        {isEditing ? (
+                          <input
+                            value={editEmployee.name}
+                            onChange={e => setEditEmployee({ ...editEmployee, name: e.target.value })}
+                            placeholder="Employee name"
+                            required
+                          />
+                        ) : (
+                          <b>{emp.name}</b>
+                        )}
+                      </td>
+                      <td>
+                        {isEditing ? (
+                          <input
+                            value={editEmployee.job}
+                            onChange={e => setEditEmployee({ ...editEmployee, job: e.target.value })}
+                            placeholder="Job role"
+                            required
+                          />
+                        ) : (
+                          <span className="jobBadge">{emp.job || 'Staff'}</span>
+                        )}
+                      </td>
+                      <td>
+                        {isEditing ? (
+                          <input
+                            value={editEmployee.phone}
+                            onChange={e => setEditEmployee({ ...editEmployee, phone: e.target.value })}
+                            placeholder="Phone number"
+                            required
+                          />
+                        ) : (
+                          <span className="phoneLink">{emp.phone || '—'}</span>
+                        )}
+                      </td>
+                      <td>
+                        {isEditing ? (
+                          <>
+                            <button className="btnSave" onClick={() => saveEmployeeEdit(emp.id)}>Save</button>
+                            <button className="btnCancel" onClick={() => setEditEmployee(null)}>Cancel</button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              className="btnEdit"
+                              onClick={() => setEditEmployee({ id: emp.id, name: emp.name, job: emp.job, phone: emp.phone })}
+                            >
+                              Edit
+                            </button>
+                            <button className="btnDelete" onClick={() => deleteEmployee(emp.id)}>Delete</button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })
+              ) : (
+                <tr><td colSpan={4}><Empty>No employees registered yet. Add team members above.</Empty></td></tr>
+              )}
+            </tbody>
+          </table>
+        </section>
+      </Layout>
+    ),
+    Attendance: () => {
+      const today = new Date().toISOString().split('T')[0]
+      const fullCount = data.attendance.filter(a => a.date === today && a.status === 'Full day').length
+      const halfCount = data.attendance.filter(a => a.date === today && a.status === 'Half day').length
+      const leaveCount = data.attendance.filter(a => a.date === today && a.status === 'Leave').length
+
+      return (
+        <Layout title="Attendance">
+          <div className="metrics" style={{ gridTemplateColumns: 'repeat(4, 1fr)', marginBottom: '18px' }}>
+            <div className="metric">
+              <small>TOTAL EMPLOYEES</small>
+              <strong>{data.employees.length}</strong>
+              <span>registered staff</span>
+            </div>
+            <div className="metric">
+              <small>FULL DAY (TODAY)</small>
+              <strong style={{ color: '#16a34a' }}>{fullCount}</strong>
+              <span style={{ color: '#16a34a' }}>present full shift</span>
+            </div>
+            <div className="metric">
+              <small>HALF DAY (TODAY)</small>
+              <strong style={{ color: '#d97706' }}>{halfCount}</strong>
+              <span style={{ color: '#d97706' }}>partial shift</span>
+            </div>
+            <div className="metric">
+              <small>ON LEAVE (TODAY)</small>
+              <strong style={{ color: '#dc2626' }}>{leaveCount}</strong>
+              <span style={{ color: '#dc2626' }}>absent / on leave</span>
+            </div>
+          </div>
+
+          <Form title="Mark Employee Attendance" onSubmit={addAttendance}>
+            <select name="employee_id" required defaultValue="">
+              <option value="" disabled>-- Select Employee --</option>
+              {data.employees.map(emp => (
+                <option key={emp.id} value={emp.id}>
+                  {emp.name} ({emp.job || 'Staff'})
+                </option>
+              ))}
+            </select>
+            <input
+              name="date"
+              type="date"
+              defaultValue={today}
+              required
+              title="Attendance date (auto-fetched to today)"
+            />
+            <select name="status" defaultValue="Full day" required>
+              <option value="Full day">Full day</option>
+              <option value="Half day">Half day</option>
+              <option value="Leave">Leave</option>
+            </select>
+          </Form>
+
+          <section className="tablecard">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Employee</th>
+                  <th>Attendance Status</th>
+                  <th style={{ width: '180px' }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.attendance.length ? (
+                  data.attendance.map(att => {
+                    const isEditing = editAttendance?.id === att.id
+                    const statusClass = att.status === 'Full day'
+                      ? 'statusFullDay'
+                      : (att.status === 'Half day' ? 'statusHalfDay' : 'statusLeave')
+
+                    return (
+                      <tr key={att.id}>
+                        <td>
+                          {isEditing ? (
+                            <input
+                              type="date"
+                              value={editAttendance.date}
+                              onChange={e => setEditAttendance({ ...editAttendance, date: e.target.value })}
+                              required
+                            />
+                          ) : (
+                            fmt(att.date)
+                          )}
+                        </td>
+                        <td>
+                          {isEditing ? (
+                            <select
+                              value={editAttendance.employee_id}
+                              onChange={e => {
+                                const found = data.employees.find(emp => String(emp.id) === String(e.target.value))
+                                setEditAttendance({
+                                  ...editAttendance,
+                                  employee_id: e.target.value,
+                                  employee_name: found ? found.name : editAttendance.employee_name
+                                })
+                              }}
+                            >
+                              {data.employees.map(emp => (
+                                <option key={emp.id} value={emp.id}>{emp.name}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <b>{att.employee_name || 'Staff'}</b>
+                          )}
+                        </td>
+                        <td>
+                          {isEditing ? (
+                            <select
+                              value={editAttendance.status}
+                              onChange={e => setEditAttendance({ ...editAttendance, status: e.target.value })}
+                            >
+                              <option value="Full day">Full day</option>
+                              <option value="Half day">Half day</option>
+                              <option value="Leave">Leave</option>
+                            </select>
+                          ) : (
+                            <span className={statusClass}>
+                              {att.status === 'Full day' ? '● Full day' : (att.status === 'Half day' ? '◑ Half day' : '○ Leave')}
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          {isEditing ? (
+                            <>
+                              <button className="btnSave" onClick={() => saveAttendanceEdit(att.id)}>Save</button>
+                              <button className="btnCancel" onClick={() => setEditAttendance(null)}>Cancel</button>
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                className="btnEdit"
+                                onClick={() => setEditAttendance({
+                                  id: att.id,
+                                  employee_id: att.employee_id,
+                                  employee_name: att.employee_name,
+                                  date: att.date,
+                                  status: att.status
+                                })}
+                              >
+                                Edit
+                              </button>
+                              <button className="btnDelete" onClick={() => deleteAttendance(att.id)}>Delete</button>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })
+                ) : (
+                  <tr><td colSpan={4}><Empty>No attendance records yet. Mark staff attendance above.</Empty></td></tr>
+                )}
+              </tbody>
+            </table>
+          </section>
+        </Layout>
+      )
+    },
     'Sales & Customers': () => {
       return (
         <Layout title="Sales & Customers">
@@ -1880,6 +2216,17 @@ function Portal() {
       }
     }
     route()
+
+    if (!supabase) return
+    const channel = supabase
+      .channel('portal-business-access-live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'businesses' }, () => {
+        route()
+      })
+      .subscribe()
+    return () => {
+      supabase.removeChannel(channel)
+    }
   }, [s])
 
   if (!configured) return <div className="loader">Supabase configuration missing in .env</div>
