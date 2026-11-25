@@ -171,7 +171,7 @@ function Admin() {
     setEditForm({
       name: x.business_name || '',
       duration: 'keep',
-      customDate: x.access_ends_at ? x.access_ends_at.slice(0, 10) : '',
+      customDate: x.access_ends_at ? x.access_ends_at.slice(0, 10) : new Date().toISOString().slice(0, 10),
       unlimited: !x.access_ends_at
     })
     setNote('')
@@ -195,12 +195,23 @@ function Admin() {
         return
       }
       newEndsAt = new Date(editForm.customDate + 'T23:59:59').toISOString()
-    } else if (editForm.duration !== 'keep') {
-      const days = Number(editForm.duration)
+    } else if (typeof editForm.duration === 'string' && editForm.duration.startsWith('set-')) {
+      const days = Number(editForm.duration.replace('set-', ''))
+      newEndsAt = new Date(Date.now() + days * 86400000).toISOString()
+    } else if (typeof editForm.duration === 'string' && editForm.duration.startsWith('add-')) {
+      const days = Number(editForm.duration.replace('add-', ''))
       const base = currentBiz?.access_ends_at && new Date(currentBiz.access_ends_at) > new Date()
         ? new Date(currentBiz.access_ends_at).getTime()
         : Date.now()
       newEndsAt = new Date(base + days * 86400000).toISOString()
+    } else if (editForm.duration !== 'keep') {
+      const days = Number(editForm.duration)
+      if (!isNaN(days) && days > 0) {
+        const base = currentBiz?.access_ends_at && new Date(currentBiz.access_ends_at) > new Date()
+          ? new Date(currentBiz.access_ends_at).getTime()
+          : Date.now()
+        newEndsAt = new Date(base + days * 86400000).toISOString()
+      }
     }
 
     setUpdatingId(businessId)
@@ -227,6 +238,17 @@ function Admin() {
       const out = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(out.error || 'Failed to update workspace')
 
+      // Optimistically update React state immediately
+      setBs(prev => prev.map(b => {
+        if (b.business_id === businessId) {
+          return {
+            ...b,
+            business_name: trimmedName,
+            access_ends_at: newEndsAt
+          }
+        }
+        return b
+      }))
       setNote(`Workspace "${trimmedName}" updated successfully.`)
       setEditingId(null)
       await load()
@@ -444,12 +466,15 @@ function Admin() {
                               unlimited: e.target.value === 'unlimited'
                             })}
                           >
-                            <option value="keep">Keep current access</option>
-                            <option value="7">+7 days extension</option>
-                            <option value="30">+30 days extension</option>
-                            <option value="90">+90 days extension</option>
-                            <option value="180">+6 months extension</option>
-                            <option value="365">+1 year extension</option>
+                            <option value="keep">Keep current access {x.access_ends_at ? `(${fmt(x.access_ends_at)})` : '(No limit)'}</option>
+                            <option value="set-7">Set 7 days access from today</option>
+                            <option value="set-30">Set 30 days access from today</option>
+                            <option value="set-90">Set 90 days access from today</option>
+                            <option value="set-180">Set 6 months access from today</option>
+                            <option value="set-365">Set 1 year access from today</option>
+                            <option value="add-7">+7 days extension</option>
+                            <option value="add-30">+30 days extension</option>
+                            <option value="add-90">+90 days extension</option>
                             <option value="custom">Pick exact expiry date…</option>
                             <option value="unlimited">No expiration (Unlimited)</option>
                           </select>
@@ -581,6 +606,7 @@ function Restaurant({ business }) {
   const [note, setNote] = useState('')
 
   const [inventoryTab, setInventoryTab] = useState('packed')
+  const [purchaseDest, setPurchaseDest] = useState('ingredients')
   const [editProd, setEditProd] = useState(null)
   const [editIng, setEditIng] = useState(null)
   const [editPurchase, setEditPurchase] = useState(null)
@@ -818,15 +844,23 @@ function Restaurant({ business }) {
   async function addPurchase(e) {
     e.preventDefault()
     let f = new FormData(e.target)
-    await execute('insert into purchases(product_name,quantity,unit,total_cost,purchased_at) values(?,?,?,?,?)', [
-      f.get('name')?.toString().trim(),
-      Number(f.get('quantity')) || 1,
-      f.get('unit') || 'Piece',
-      Number(f.get('cost')) || 0,
-      new Date().toISOString()
+    const destination = f.get('destination') || purchaseDest || 'ingredients'
+    const name = f.get('name')?.toString().trim()
+    const quantity = Number(f.get('quantity')) || 1
+    const unit = f.get('unit') || 'Piece'
+    const cost = Number(f.get('cost')) || 0
+
+    await execute('insert into purchases(product_name,quantity,unit,total_cost,purchased_at,destination) values(?,?,?,?,?,?)', [
+      name,
+      quantity,
+      unit,
+      cost,
+      new Date().toISOString(),
+      destination
     ])
     e.target.reset()
     await load()
+    setNote(`✓ Purchase recorded: "${name}" (+${quantity} ${unit}) added to ${destination === 'packed' ? 'Packed Goods (Billing)' : 'Ingredients'}!`)
   }
 
   async function savePurchaseEdit(id) {
@@ -837,10 +871,12 @@ function Restaurant({ business }) {
       quantity: Number(editPurchase.quantity) || 1,
       unit: editPurchase.unit,
       total_cost: Number(editPurchase.cost) || 0,
-      cost: Number(editPurchase.cost) || 0
+      cost: Number(editPurchase.cost) || 0,
+      destination: editPurchase.destination || 'ingredients'
     })
     setEditPurchase(null)
     await load()
+    setNote('Purchase record updated successfully.')
   }
 
   async function deletePurchase(id) {
@@ -1639,17 +1675,38 @@ function Restaurant({ business }) {
     },
     'Product Purchase': () => (
       <Layout title="Product Purchase">
-        <Form title="Record product purchase (Stores in Ingredients)" onSubmit={addPurchase}>
+        <Form title={`Record product purchase → Stores in ${purchaseDest === 'packed' ? 'Packed Goods (Billing)' : 'Ingredients'}`} onSubmit={addPurchase}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <label style={{ fontSize: '11px', fontWeight: 700, color: '#475569' }}>
+              Add to Stock Location:
+            </label>
+            <select
+              name="destination"
+              value={purchaseDest}
+              onChange={e => setPurchaseDest(e.target.value)}
+              style={{
+                padding: '8px 12px',
+                fontWeight: 700,
+                color: purchaseDest === 'packed' ? '#1d4ed8' : '#15803d',
+                background: purchaseDest === 'packed' ? '#eff6ff' : '#f0fdf4',
+                border: purchaseDest === 'packed' ? '1px solid #93c5fd' : '1px solid #86efac'
+              }}
+            >
+              <option value="ingredients">🥕 Ingredients (Raw materials for recipes)</option>
+              <option value="packed">📦 Packed Goods (Finished goods for direct sale / billing)</option>
+            </select>
+          </div>
           <input
             name="name"
-            list="ingredient-suggestions"
-            placeholder="Purchased product / ingredient name"
+            list="purchase-suggestions"
+            placeholder={purchaseDest === 'packed' ? 'Packed good name (e.g. Juice, Chips, Bread)' : 'Purchased ingredient name (e.g. Flour, Sugar)'}
             required
           />
-          <datalist id="ingredient-suggestions">
-            {data.ingredients.map(ing => (
-              <option key={ing.id} value={ing.name} />
-            ))}
+          <datalist id="purchase-suggestions">
+            {purchaseDest === 'packed'
+              ? data.products.map(p => <option key={p.id} value={p.name} />)
+              : data.ingredients.map(ing => <option key={ing.id} value={ing.name} />)
+            }
           </datalist>
           <input name="quantity" type="number" min="0.001" step="any" placeholder="Quantity" required />
           <select name="unit">
@@ -1667,7 +1724,8 @@ function Restaurant({ business }) {
             <thead>
               <tr>
                 <th>Date</th>
-                <th>Product / Ingredient</th>
+                <th>Product / Item</th>
+                <th>Stock Location</th>
                 <th>Quantity</th>
                 <th>Cost</th>
                 <th style={{ width: '180px' }}>Actions</th>
@@ -1690,6 +1748,28 @@ function Restaurant({ business }) {
                           />
                         ) : (
                           pu.product_name || pu.name || '—'
+                        )}
+                      </td>
+                      <td>
+                        {isEditing ? (
+                          <select
+                            value={editPurchase.destination || 'ingredients'}
+                            onChange={e => setEditPurchase({ ...editPurchase, destination: e.target.value })}
+                            style={{ fontSize: '12px', padding: '4px 8px' }}
+                          >
+                            <option value="ingredients">🥕 Ingredients</option>
+                            <option value="packed">📦 Packed Goods</option>
+                          </select>
+                        ) : (
+                          pu.destination === 'packed' ? (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '3px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 700, background: '#eff6ff', color: '#1d4ed8', border: '1px solid #bfdbfe' }}>
+                              📦 Packed Good
+                            </span>
+                          ) : (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '3px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 700, background: '#f0fdf4', color: '#15803d', border: '1px solid #bbf7d0' }}>
+                              🥕 Ingredient
+                            </span>
+                          )
                         )}
                       </td>
                       <td>
@@ -1750,7 +1830,8 @@ function Restaurant({ business }) {
                                 product_name: pu.product_name || pu.name || '',
                                 quantity: pu.quantity || 1,
                                 unit: pu.unit || 'Piece',
-                                cost: pu.total_cost ?? pu.cost ?? 0
+                                cost: pu.total_cost ?? pu.cost ?? 0,
+                                destination: pu.destination || 'ingredients'
                               })}
                             >
                               Edit
@@ -1763,7 +1844,7 @@ function Restaurant({ business }) {
                   )
                 })
               ) : (
-                <tr><td colSpan={5}><Empty>No purchase records yet.</Empty></td></tr>
+                <tr><td colSpan={6}><Empty>No purchase records yet.</Empty></td></tr>
               )}
             </tbody>
           </table>

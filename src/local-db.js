@@ -87,6 +87,68 @@ function adjustIngredientFromPurchaseEdit(oldPu, newPu) {
   }
 }
 
+function syncPackedFromPurchase(pu) {
+  if (!db.products) db.products = []
+  const name = (pu.product_name || pu.name || '').trim()
+  if (!name) return
+
+  const qty = Number(pu.quantity || 1)
+  const cost = Number(pu.total_cost != null ? pu.total_cost : (pu.cost != null ? pu.cost : 0))
+  const unit = pu.unit || 'Piece'
+
+  let product = db.products.find(p => (p.name || '').toLowerCase() === name.toLowerCase())
+  if (product) {
+    product.quantity = Number((Number(product.quantity || 0) + qty).toFixed(2))
+    if (!product.selling_price && cost > 0 && qty > 0) {
+      const unitCost = cost / qty
+      product.selling_price = Number((unitCost * 1.3).toFixed(2))
+      product.price = product.selling_price
+    }
+  } else {
+    const unitCost = (cost > 0 && qty > 0) ? (cost / qty) : 0
+    const sp = Number((unitCost > 0 ? unitCost * 1.3 : 50).toFixed(2))
+    product = {
+      id: ++db.counters.products,
+      name,
+      selling_price: sp,
+      price: sp,
+      quantity: Number(qty.toFixed(2)),
+      unit
+    }
+    db.products.push(product)
+  }
+}
+
+function adjustPackedFromPurchaseDelete(pu) {
+  if (!db.products) return
+  const name = (pu.product_name || pu.name || '').trim().toLowerCase()
+  if (!name) return
+  const prod = db.products.find(p => (p.name || '').toLowerCase() === name)
+  if (prod) {
+    const qty = Number(pu.quantity || 1)
+    prod.quantity = Math.max(0, Number((Number(prod.quantity || 0) - qty).toFixed(2)))
+  }
+}
+
+function adjustPackedFromPurchaseEdit(oldPu, newPu) {
+  if (!db.products) return
+  const oldName = (oldPu.product_name || oldPu.name || '').trim().toLowerCase()
+  const newName = (newPu.product_name || newPu.name || '').trim().toLowerCase()
+  const oldQty = Number(oldPu.quantity || 1)
+  const newQty = Number(newPu.quantity || 1)
+
+  if (oldName === newName) {
+    const prod = db.products.find(p => (p.name || '').toLowerCase() === newName)
+    if (prod) {
+      const deltaQty = newQty - oldQty
+      prod.quantity = Math.max(0, Number((Number(prod.quantity || 0) + deltaQty).toFixed(2)))
+    }
+  } else {
+    adjustPackedFromPurchaseDelete(oldPu)
+    syncPackedFromPurchase(newPu)
+  }
+}
+
 export async function openLocalDb() {
   try {
     if (window.crumbDesktop && window.crumbDesktop.readDb) {
@@ -202,7 +264,8 @@ export async function openLocalDb() {
       total_cost: cost,
       cost: cost,
       purchased_at: dt,
-      date: dt
+      date: dt,
+      destination: pu.destination || 'ingredients'
     }
   })
 
@@ -360,7 +423,12 @@ export async function execute(sql, params = []) {
     row.cost = row.total_cost
     row.purchased_at = row.purchased_at || new Date().toISOString()
     row.date = row.purchased_at
-    syncIngredientFromPurchase(row)
+    row.destination = row.destination || 'ingredients'
+    if (row.destination === 'packed') {
+      syncPackedFromPurchase(row)
+    } else {
+      syncIngredientFromPurchase(row)
+    }
   } else if (t === 'expenses') {
     row.amount = Number(row.amount || 0)
     row.expense_at = row.expense_at || new Date().toISOString()
@@ -419,7 +487,22 @@ export async function updateRecord(table, id, data) {
         updated.cost = c
       }
       if (data.quantity != null) updated.quantity = Number(data.quantity)
-      adjustIngredientFromPurchaseEdit(old, updated)
+      if (data.destination != null) updated.destination = data.destination
+
+      const oldDest = old.destination || 'ingredients'
+      const newDest = updated.destination || 'ingredients'
+
+      if (oldDest === 'packed' && newDest === 'packed') {
+        adjustPackedFromPurchaseEdit(old, updated)
+      } else if (oldDest === 'ingredients' && newDest === 'ingredients') {
+        adjustIngredientFromPurchaseEdit(old, updated)
+      } else if (oldDest === 'ingredients' && newDest === 'packed') {
+        adjustIngredientFromPurchaseDelete(old)
+        syncPackedFromPurchase(updated)
+      } else if (oldDest === 'packed' && newDest === 'ingredients') {
+        adjustPackedFromPurchaseDelete(old)
+        syncIngredientFromPurchase(updated)
+      }
     } else if (table === 'expenses') {
       if (data.amount != null) updated.amount = Number(data.amount)
     }
@@ -556,7 +639,11 @@ export async function deleteRecord(table, id) {
   if (db[table]) {
     const item = db[table].find(x => String(x.id) === String(id))
     if (table === 'purchases' && item) {
-      adjustIngredientFromPurchaseDelete(item)
+      if (item.destination === 'packed') {
+        adjustPackedFromPurchaseDelete(item)
+      } else {
+        adjustIngredientFromPurchaseDelete(item)
+      }
     }
     db[table] = db[table].filter(x => String(x.id) !== String(id))
     await persist()
