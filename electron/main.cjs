@@ -12,7 +12,7 @@ function createWindow(){
     height: 900,
     minWidth: 1024,
     minHeight: 700,
-    title: 'Crumb & Co. ERP',
+    title: 'WERP - Crumb & Co. ERP',
     icon: path.join(__dirname, '..', 'build', 'icon.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),

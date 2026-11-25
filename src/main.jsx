@@ -100,6 +100,7 @@ function Admin() {
   const [customDates, setCustomDates] = useState({})
   const [note, setNote] = useState('')
   const [updatingId, setUpdatingId] = useState(null)
+  const [showConfig, setShowConfig] = useState(false)
   const isDesktop = typeof window !== 'undefined' && window.location.protocol === 'file:'
   const [apiBaseUrl, setApiBaseUrl] = useState(() => {
     return (import.meta.env.VITE_API_BASE_URL || localStorage.getItem('crumb-api-base-url') || '').trim()
@@ -238,18 +239,28 @@ function Admin() {
           <h1>Platform administrator</h1>
           <p>Login, workspace and duration control only. Client operational data is local.</p>
         </div>
-        <button className="adminSignout" onClick={() => supabase.auth.signOut()}>Sign out</button>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <button
+            type="button"
+            className="btnEdit"
+            style={{ padding: '8px 12px', fontSize: '12px' }}
+            onClick={() => setShowConfig(!showConfig)}
+          >
+            ⚙️ Server URL
+          </button>
+          <button className="adminSignout" onClick={() => supabase.auth.signOut()}>Sign out</button>
+        </div>
       </div>
 
-      {isDesktop && (
-        <section className="formcard" style={{ marginBottom: '16px', background: '#f5f3ff', borderColor: '#c4b5fd' }}>
-          <h2 style={{ color: '#4c1d95', fontSize: '14px', marginBottom: '4px' }}>🔗 Vercel Backend API URL</h2>
-          <p style={{ color: '#6d28d9', fontSize: '12px', margin: '0 0 10px' }}>
-            Enter your deployed Vercel URL (e.g. <code>https://crumb-erp.vercel.app</code>) to allow this desktop EXE to provision workspaces.
+      {showConfig && (
+        <section className="formcard" style={{ marginBottom: '16px', background: '#f8fafc', borderColor: '#cbd5e1' }}>
+          <h2 style={{ fontSize: '14px', marginBottom: '4px' }}>🔗 Backend API Endpoint</h2>
+          <p style={{ color: '#64748b', fontSize: '12px', margin: '0 0 10px' }}>
+            Set custom Vercel / server endpoint (e.g. <code>https://crumb-erp.vercel.app</code>) if provisioning from desktop.
           </p>
           <div style={{ display: 'flex', gap: '8px' }}>
             <input
-              placeholder="https://your-project.vercel.app"
+              placeholder="https://your-deployment.vercel.app"
               value={apiBaseUrl}
               onChange={e => {
                 const val = e.target.value.trim()
@@ -258,6 +269,18 @@ function Admin() {
               }}
               style={{ background: '#fff' }}
             />
+            {apiBaseUrl && (
+              <button
+                type="button"
+                onClick={() => {
+                  setApiBaseUrl('')
+                  localStorage.removeItem('crumb-api-base-url')
+                }}
+                style={{ padding: '6px 12px', background: '#e2e8f0', color: '#334155', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px' }}
+              >
+                Clear
+              </button>
+            )}
           </div>
         </section>
       )}
